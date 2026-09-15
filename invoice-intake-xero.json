@@ -1,0 +1,613 @@
+{
+  "name": "Check supplier invoices from Gmail against Xero contacts and purchase orders",
+  "nodes": [
+    {
+      "parameters": {
+        "simple": false,
+        "filters": {
+          "labelIds": [
+            "<__PLACEHOLDER_VALUE__Gmail label your supplier invoices land in, e.g. Invoices__>"
+          ],
+          "hasAttachment": true
+        },
+        "options": {
+          "downloadAttachments": true
+        },
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -260,
+        240
+      ],
+      "id": "invoice-arrives-by-email",
+      "name": "Invoice arrives by email"
+    },
+    {
+      "parameters": {
+        "options": {},
+        "conditions": {
+          "options": {
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": false,
+            "typeValidation": "loose"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "pdf",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "leftValue": "={{ $binary.attachment_0.fileExtension }}",
+              "rightValue": "pdf"
+            }
+          ]
+        },
+        "looseTypeValidation": true
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        -40,
+        240
+      ],
+      "id": "keep-only-pdfs",
+      "name": "Keep only PDFs"
+    },
+    {
+      "parameters": {
+        "options": {},
+        "operation": "pdf",
+        "binaryPropertyName": "attachment_0"
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        180,
+        240
+      ],
+      "id": "read-the-pdf",
+      "name": "Read the PDF"
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o-mini",
+        "options": {
+          "temperature": 0
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        400,
+        440
+      ],
+      "id": "extraction-model",
+      "name": "Extraction model"
+    },
+    {
+      "parameters": {
+        "text": "={{ $json.text }}",
+        "options": {
+          "systemPromptTemplate": "You read supplier invoices and return structured data. Accuracy matters more than completeness.\n\n1. Return null for any field you cannot read with confidence. Never guess a number.\n2. Amounts are numbers. No currency symbols, no thousands separators.\n3. Dates are ISO yyyy-mm-dd. If the format is ambiguous, prefer day first, which is the British and Gulf convention.\n4. Take the FINAL total, which on a multi page invoice is on the last page. Never take a subtotal from page one.\n5. A credit note carries negative amounts. If the document says credit note or refund, return every amount as a negative number.\n6. The supplier is who issued the invoice, not who received it. If a logo and a bill to address disagree, the supplier is the one with the tax registration number.\n7. Tax registration numbers are digits only. Strip spaces and labels such as VAT No, VAT Reg or TRN."
+        },
+        "schemaType": "fromJson",
+        "jsonSchemaExample": "{\n  \"supplier\": \"Midlands Fire Supplies Ltd\",\n  \"supplier_tax_number\": \"GB123456789\",\n  \"invoice_number\": \"INV-2041\",\n  \"po_number\": \"PO-8814\",\n  \"issue_date\": \"2026-08-14\",\n  \"due_date\": \"2026-09-13\",\n  \"currency\": \"GBP\",\n  \"subtotal\": 4200.0,\n  \"tax_amount\": 840.0,\n  \"total\": 5040.0,\n  \"line_items\": [\n    {\n      \"description\": \"Fire door inspection kit\",\n      \"quantity\": 5,\n      \"unit_price\": 840.0,\n      \"amount\": 4200.0\n    }\n  ]\n}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        400,
+        240
+      ],
+      "id": "read-the-invoice",
+      "name": "Read the invoice"
+    },
+    {
+      "parameters": {
+        "resource": "contact",
+        "operation": "getAll",
+        "returnAll": true,
+        "organizationId": "<__PLACEHOLDER_VALUE__Your Xero organisation, pick it from the list__>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.xero",
+      "typeVersion": 1,
+      "position": [
+        620,
+        240
+      ],
+      "id": "suppliers-in-xero",
+      "name": "Suppliers in Xero"
+    },
+    {
+      "parameters": {
+        "url": "https://api.xero.com/api.xro/2.0/PurchaseOrders",
+        "options": {},
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "Status",
+              "value": "AUTHORISED"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "Xero-tenant-id",
+              "value": "<__PLACEHOLDER_VALUE__Your Xero tenant id, the same organisation as above__>"
+            }
+          ]
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "xeroOAuth2Api"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        840,
+        240
+      ],
+      "id": "open-purchase-orders",
+      "name": "Open purchase orders"
+    },
+    {
+      "parameters": {
+        "resource": "invoice",
+        "operation": "getAll",
+        "returnAll": true,
+        "organizationId": "<__PLACEHOLDER_VALUE__Same Xero organisation__>",
+        "options": {
+          "where": "Type==\"ACCPAY\""
+        }
+      },
+      "type": "n8n-nodes-base.xero",
+      "typeVersion": 1,
+      "position": [
+        1060,
+        240
+      ],
+      "id": "bills-already-in-xero",
+      "name": "Bills already in Xero"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Everything a person checks before an invoice is allowed into the ledger.\n// Nothing here calls an API. It compares what the model read off the PDF\n// against the Xero contacts, the open purchase orders and the bills already\n// posted, then says post it, hold it for a person, or send it back.\n\nconst inv = $('Read the invoice').first().json.output || $('Read the invoice').first().json;\n\nconst contacts = $('Suppliers in Xero').all().map(i => i.json);\nconst posted   = $('Bills already in Xero').all().map(i => i.json);\n\n// The purchase orders come back from the Xero API as one item holding an array.\nconst poResponse = $('Open purchase orders').first().json;\nconst orders = Array.isArray(poResponse.PurchaseOrders) ? poResponse.PurchaseOrders\n             : Array.isArray(poResponse) ? poResponse : [];\n\n// ---- tunables ---------------------------------------------------------------\nconst ROUNDING_TOLERANCE = 0.02;   // currency units allowed on subtotal + tax = total\nconst PO_TOLERANCE_PCT   = 2;      // percent an invoice may exceed the purchase order\nconst MAX_AGE_DAYS       = 120;    // older than this is almost always a re-submission\nconst APPROVAL_LIMIT     = 10000;  // above this a person signs it off even when clean\nconst VALID_TAX_RATES    = [0, 5, 20];  // set these to your own jurisdiction\n// -----------------------------------------------------------------------------\n\nconst norm = s => String(s == null ? '' : s).toLowerCase()\n  .replace(/\\b(ltd|limited|llc|l\\.l\\.c|plc|llp|inc|co|company|fzco|fze|fzc|est|establishment)\\b/g, '')\n  .replace(/[^a-z0-9]/g, '').trim();\n\nconst num = v => {\n  const s = String(v == null ? '' : v).replace(/[^0-9.\\-]/g, '');\n  if (s === '' || s === '-' || s === '.') return null;\n  const n = Number(s);\n  return Number.isFinite(n) ? n : null;\n};\n\nconst days = d => { const t = Date.parse(d); return Number.isFinite(t) ? Math.round((Date.now() - t) / 86400000) : null; };\n\nconst failures = [];\nconst warnings = [];\n\n// 1. Did the model actually read the document. A missing field is never guessed.\nfor (const f of ['supplier', 'invoice_number', 'total']) {\n  if (inv[f] == null || String(inv[f]).trim() === '') failures.push('could not read the ' + f.replace('_', ' ') + ' from the PDF');\n}\n\nconst total    = num(inv.total);\nconst subtotal = num(inv.subtotal);\nconst tax      = num(inv.tax_amount);\n\n// 2. Is this supplier one of ours, and are they still active in Xero.\nconst supplierKey = norm(inv.supplier);\nconst contact = contacts.find(c => norm(c.Name) === supplierKey)\n  || contacts.find(c => supplierKey && norm(c.Name).includes(supplierKey));\n\nif (!contact) {\n  failures.push('supplier \"' + inv.supplier + '\" is not a contact in Xero');\n} else {\n  if (String(contact.ContactStatus || '').toUpperCase() === 'ARCHIVED') {\n    failures.push('supplier \"' + contact.Name + '\" is archived in Xero');\n  }\n  // 3. Tax number. A changed tax number is the classic redirected payment fraud.\n  const onFile = String(contact.TaxNumber || '').replace(/\\D/g, '');\n  const onDoc  = String(inv.supplier_tax_number || '').replace(/\\D/g, '');\n  if (onFile && onDoc && onFile !== onDoc) {\n    failures.push('tax number on the invoice (' + onDoc + ') does not match the one on the Xero contact (' + onFile + ')');\n  } else if (onFile && !onDoc) {\n    warnings.push('no tax number on the invoice, one is held in Xero');\n  }\n}\n\n// 4. Have we already posted this exact bill.\nconst dup = posted.find(b =>\n  String(b.InvoiceNumber || '').trim().toLowerCase() === String(inv.invoice_number || '').trim().toLowerCase() &&\n  norm((b.Contact || {}).Name) === supplierKey);\nif (dup) failures.push('invoice ' + inv.invoice_number + ' is already in Xero as ' + (dup.InvoiceID || 'an existing bill'));\n\n// 5. Does the invoice add up. This is arithmetic, not opinion.\nif (total != null && subtotal != null && tax != null) {\n  if (Math.abs((subtotal + tax) - total) > ROUNDING_TOLERANCE) {\n    failures.push('subtotal ' + subtotal + ' plus tax ' + tax + ' is ' + (subtotal + tax).toFixed(2) + ', not the stated total ' + total);\n  }\n  if (subtotal > 0) {\n    const rate = Math.round((tax / subtotal) * 1000) / 10;\n    if (!VALID_TAX_RATES.some(r => Math.abs(rate - r) < 0.6)) {\n      warnings.push('tax works out at ' + rate + ' percent, which is not a rate we expect');\n    }\n  }\n}\n\n// 6. Match the purchase order, if one is quoted.\nlet matchedPo = null;\nif (inv.po_number) {\n  matchedPo = orders.find(o => String(o.PurchaseOrderNumber || '').trim().toLowerCase() === String(inv.po_number).trim().toLowerCase());\n  if (!matchedPo) {\n    failures.push('purchase order ' + inv.po_number + ' is not open in Xero');\n  } else {\n    const poTotal = num(matchedPo.Total);\n    if (poTotal != null && total != null && poTotal > 0) {\n      const over = ((total - poTotal) / poTotal) * 100;\n      if (over > PO_TOLERANCE_PCT) {\n        failures.push('invoice is ' + over.toFixed(1) + ' percent above purchase order ' + inv.po_number + ' (' + total + ' against ' + poTotal + ')');\n      }\n    }\n    const poSupplier = norm((matchedPo.Contact || {}).Name);\n    if (poSupplier && supplierKey && poSupplier !== supplierKey) {\n      failures.push('purchase order ' + inv.po_number + ' belongs to ' + (matchedPo.Contact || {}).Name + ', not ' + inv.supplier);\n    }\n  }\n} else {\n  warnings.push('no purchase order quoted on the invoice');\n}\n\n// 7. Age. An old invoice arriving now is usually a second attempt at payment.\nconst age = days(inv.issue_date);\nif (age != null && age > MAX_AGE_DAYS) {\n  failures.push('invoice is dated ' + inv.issue_date + ', which is ' + age + ' days ago');\n}\n\n// 8. Value. Above the limit a person signs it off however clean it looks.\nconst overLimit = total != null && Math.abs(total) > APPROVAL_LIMIT;\n\n// A credit note is negative by design and must never be posted as a bill.\nconst isCredit = total != null && total < 0;\n\nlet decision;\nif (failures.length)      decision = 'reject';\nelse if (isCredit)        decision = 'approve';\nelse if (overLimit)       decision = 'approve';\nelse                      decision = 'post';\n\nconst reason = failures.length ? failures[0]\n  : isCredit ? 'this is a credit note, so a person posts it against the right bill'\n  : overLimit ? 'above the approval limit of ' + APPROVAL_LIMIT\n  : 'passed every check';\n\nreturn [{\n  json: {\n    decision,\n    reason,\n    failures,\n    warnings,\n    supplier: inv.supplier || '',\n    supplier_email: (contact || {}).EmailAddress || '',\n    contact_id: (contact || {}).ContactID || '',\n    invoice_number: inv.invoice_number || '',\n    po_number: inv.po_number || '',\n    issue_date: inv.issue_date || '',\n    due_date: inv.due_date || '',\n    currency: inv.currency || '',\n    subtotal, tax_amount: tax, total,\n    line_items: inv.line_items || [],\n    checked_at: new Date().toISOString(),\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        240
+      ],
+      "id": "run-the-checks",
+      "name": "Run the checks"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "outputKey": "post",
+              "renameOutput": true,
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "dpost",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.decision }}",
+                    "rightValue": "post"
+                  }
+                ]
+              }
+            },
+            {
+              "outputKey": "approve",
+              "renameOutput": true,
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "dapprove",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.decision }}",
+                    "rightValue": "approve"
+                  }
+                ]
+              }
+            },
+            {
+              "outputKey": "reject",
+              "renameOutput": true,
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "dreject",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.decision }}",
+                    "rightValue": "reject"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        1500,
+        240
+      ],
+      "id": "post-approve-or-reject",
+      "name": "Post, approve or reject"
+    },
+    {
+      "parameters": {
+        "resource": "invoice",
+        "operation": "create",
+        "type": "ACCPAY",
+        "organizationId": "<__PLACEHOLDER_VALUE__Same Xero organisation__>",
+        "contactId": "={{ $json.contact_id }}",
+        "lineItemsUi": {
+          "lineItemsValues": [
+            {
+              "description": "={{ $json.invoice_number }}{{ $json.po_number ? ' against ' + $json.po_number : '' }}",
+              "quantity": 1,
+              "unitAmount": "={{ $json.subtotal }}"
+            }
+          ]
+        },
+        "additionalFields": {
+          "invoiceNumber": "={{ $json.invoice_number }}",
+          "date": "={{ $json.issue_date }}",
+          "dueDate": "={{ $json.due_date }}",
+          "status": "AUTHORISED",
+          "reference": "={{ $json.po_number }}"
+        }
+      },
+      "type": "n8n-nodes-base.xero",
+      "typeVersion": 1,
+      "position": [
+        1760,
+        80
+      ],
+      "id": "post-the-bill-to-xero",
+      "name": "Post the bill to Xero"
+    },
+    {
+      "parameters": {
+        "text": "=Invoice {{ $json.invoice_number }} from {{ $json.supplier }} for {{ $json.total }} {{ $json.currency }} passed every check but needs a person.\nWhy: {{ $json.reason }}\nPurchase order: {{ $json.po_number || 'none quoted' }}\n{{ $json.warnings.length ? 'Also worth knowing: ' + $json.warnings.join('; ') : '' }}\nNothing has been posted to Xero.",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "<__PLACEHOLDER_VALUE__Slack channel for accounts, e.g. #finance__>"
+        },
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        1760,
+        260
+      ],
+      "id": "ask-a-person-to-approve",
+      "name": "Ask a person to approve"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.supplier_email }}",
+        "subject": "=We cannot process invoice {{ $json.invoice_number }} yet",
+        "message": "={{ 'Hello,\\n\\nWe received invoice ' + $json.invoice_number + ' but cannot put it through accounts payable yet.\\n\\n' + $json.failures.map(function(f,i){return (i+1) + '. ' + f;}).join('\\n') + '\\n\\nPlease send a corrected invoice and we will process it on the same terms.\\n\\nAccounts Payable' }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1760,
+        460
+      ],
+      "id": "tell-the-supplier-what-is-wrong",
+      "name": "Tell the supplier what is wrong"
+    },
+    {
+      "parameters": {
+        "text": "=Rejected invoice {{ $json.invoice_number }} from {{ $json.supplier }}.\n{{ $json.failures.join('\\n') }}\nThe supplier has been told and nothing was posted.",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "<__PLACEHOLDER_VALUE__Slack channel for accounts, e.g. #finance__>"
+        },
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        1980,
+        460
+      ],
+      "id": "log-the-rejection",
+      "name": "Log the rejection"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        700
+      ],
+      "id": "when-a-run-fails",
+      "name": "When a run fails"
+    },
+    {
+      "parameters": {
+        "text": "=Invoice intake failed on \"{{ $json.execution.lastNodeExecuted }}\".\n{{ $json.execution.error.message }}\nNo bill was posted. Open the execution and rerun it once the cause is fixed.",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "<__PLACEHOLDER_VALUE__Slack channel for alerts, e.g. #ops-alerts__>"
+        },
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        -40,
+        700
+      ],
+      "id": "say-the-run-failed",
+      "name": "Say the run failed"
+    },
+    {
+      "parameters": {
+        "width": 520,
+        "height": 400,
+        "content": "## Check supplier invoices from Gmail against Xero contacts and purchase orders\n\n**Who it is for.** Any business whose supplier invoices arrive as PDFs by email and get keyed into Xero by hand. Consultancies, trades, agencies, anyone running a purchase ledger without a full time person on it.\n\n**What it does.** Reads the PDF, pulls the fields, checks them against your Xero contacts, your open purchase orders and the bills you have already posted, then either posts the bill, holds it for a person, or emails the supplier the reason it was not accepted.\n\n**What it will not do.** It never posts a credit note, never posts above your approval limit, never posts a second copy of a bill you already have, and never guesses a number it could not read.",
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -660,
+        60
+      ],
+      "id": "note--660_60",
+      "name": "Note -660_60"
+    },
+    {
+      "parameters": {
+        "width": 520,
+        "height": 420,
+        "content": "## Setup\n\n**1. Credentials.** Gmail, Xero, OpenAI and Slack. The Xero credential is used twice: by the Xero nodes and by *Open purchase orders*, which is an HTTP Request node because the Xero node does not expose purchase orders. Pick the same credential there.\n\n**2. Tenant id.** *Open purchase orders* needs your Xero tenant id in the `Xero-tenant-id` header. It is the same organisation you select on the Xero nodes.\n\n**3. Tunables.** Open *Run the checks*. The first block sets the rounding tolerance, the purchase order tolerance, the age limit, the approval limit and the tax rates you accept. `VALID_TAX_RATES` ships as 0, 5 and 20 so it covers UK and Gulf rates. Cut it to your own.\n\n**4. Gmail label.** Point the trigger at the label your invoices land in.",
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -660,
+        500
+      ],
+      "id": "note--660_500",
+      "name": "Note -660_500"
+    },
+    {
+      "parameters": {
+        "width": 420,
+        "height": 300,
+        "content": "### Why the checks are in a Code node\n\nThe model reads the document. It does not decide anything. Every rule that matters, the duplicate check, the arithmetic, the purchase order tolerance, the tax number match and the approval limit, is plain JavaScript you can read and change. Behaviour does not drift when the model changes.\n\nThe tax number check is the one people skip. A supplier whose tax number suddenly differs from the one on file is the oldest redirected payment fraud there is.",
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1240,
+        540
+      ],
+      "id": "note-1240_540",
+      "name": "Note 1240_540"
+    }
+  ],
+  "connections": {
+    "Invoice arrives by email": {
+      "main": [
+        [
+          {
+            "node": "Keep only PDFs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keep only PDFs": {
+      "main": [
+        [
+          {
+            "node": "Read the PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read the PDF": {
+      "main": [
+        [
+          {
+            "node": "Read the invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraction model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Read the invoice",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read the invoice": {
+      "main": [
+        [
+          {
+            "node": "Suppliers in Xero",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Suppliers in Xero": {
+      "main": [
+        [
+          {
+            "node": "Open purchase orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open purchase orders": {
+      "main": [
+        [
+          {
+            "node": "Bills already in Xero",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bills already in Xero": {
+      "main": [
+        [
+          {
+            "node": "Run the checks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run the checks": {
+      "main": [
+        [
+          {
+            "node": "Post, approve or reject",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post, approve or reject": {
+      "main": [
+        [
+          {
+            "node": "Post the bill to Xero",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ask a person to approve",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Tell the supplier what is wrong",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tell the supplier what is wrong": {
+      "main": [
+        [
+          {
+            "node": "Log the rejection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When a run fails": {
+      "main": [
+        [
+          {
+            "node": "Say the run failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "finamatik-templates"
+  }
+}
