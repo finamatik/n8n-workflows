@@ -1,6 +1,6 @@
 # Finamatik n8n workflows
 
-Seven n8n workflows for finance and operations teams, built and tested on sample data by [Finamatik Business Solutions](https://finamatik.com/work) in Sharjah, UAE. Each one imports into n8n 1.100 or later (Import from file) and opens with a "Read me first" note that explains who it is for, what it does and how to set it up.
+Seven n8n workflows for finance and operations teams, built and tested on sample data by [Finamatik Business Solutions](https://finamatik.com/work). Each one imports into n8n 1.100 or later (Import from file) and opens with a "Read me first" note that explains who it is for, what it does and how to set it up.
 
 No credentials and no local addresses are included. Every external system is an HTTP Request against a `base` URL held in the Config node, so a workflow imports and runs against any REST backend and any node can be swapped for the native n8n node for your CRM, ERP or accounting system.
 
