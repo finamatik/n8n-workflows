@@ -430,7 +430,7 @@
       "typeVersion": 1,
       "position": [
         1700,
-        -140
+        -320
       ],
       "id": "sticky-note2",
       "name": "Sticky Note2"
@@ -446,7 +446,7 @@
       "typeVersion": 1,
       "position": [
         1280,
-        560
+        820
       ],
       "id": "sticky-note3",
       "name": "Sticky Note3"

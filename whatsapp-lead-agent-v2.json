@@ -613,7 +613,7 @@
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        -620,
+        -800,
         60
       ],
       "id": "note--620_60",
@@ -629,7 +629,7 @@
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        -620,
+        -800,
         520
       ],
       "id": "note--620_520",
@@ -677,7 +677,7 @@
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        140,
+        180,
         1020
       ],
       "id": "note-140_1020",
