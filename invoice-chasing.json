@@ -1,0 +1,948 @@
+{
+  "name": "Chase the supplier invoices that never arrived, from Gmail and Google Sheets",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "id": "every-morning",
+      "name": "Every morning"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "<__PLACEHOLDER_VALUE__The Google Sheet holding your three tabs__>"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Expected invoices"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        200,
+        300
+      ],
+      "id": "expected-invoices",
+      "name": "Expected invoices",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "<__PLACEHOLDER_VALUE__The Google Sheet holding your three tabs__>"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Invoices received"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        400,
+        300
+      ],
+      "id": "invoices-received",
+      "name": "Invoices received",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "<__PLACEHOLDER_VALUE__The Google Sheet holding your three tabs__>"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Chase log"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        600,
+        300
+      ],
+      "id": "chase-log",
+      "name": "Chase log",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Works out which expected invoices have not arrived, and what to do about each\n// one. Nothing here sends anything. It reads three tabs and returns one row per\n// action, so every rule that decides whether a supplier gets an email is in one\n// place you can read and change.\n\nconst register = $('Expected invoices').all().map(i => i.json);\nconst received = $('Invoices received').all().map(i => i.json);\nconst chases   = $('Chase log').all().map(i => i.json);\n\n// ---- tunables ---------------------------------------------------------------\nconst LOOKBACK_PERIODS = 3;   // how far back to care. Stops a first run chasing years\nconst GRACE_DAYS       = 3;   // days after the due date before anything is late\nconst REMINDER_GAP     = 5;   // days to wait between one chase and the next\nconst MAX_ATTEMPTS     = 2;   // reminders before it goes to a person\nconst MAX_PER_RUN      = 20;  // hard ceiling on actions in a single run\n// -----------------------------------------------------------------------------\n\nconst norm = s => String(s == null ? '' : s).toLowerCase()\n  .replace(/\\b(ltd|limited|llc|l\\.l\\.c|plc|llp|inc|co|company|fzco|fze|fzc|est|establishment)\\b/g, '')\n  .replace(/[^a-z0-9]/g, '').trim();\n\nconst clean = v => String(v == null ? '' : v).trim();\n\nconst parseDate = v => {\n  const s = clean(v);\n  if (!s) return null;\n  const t = Date.parse(s);\n  return Number.isFinite(t) ? new Date(t) : null;\n};\n\nconst daysBetween = (a, b) => Math.floor((a.getTime() - b.getTime()) / 86400000);\n\nconst today = new Date();\ntoday.setHours(0, 0, 0, 0);\n\n// Period keys. A period is what an invoice covers, not when it arrived, so a\n// September invoice that turns up in October still closes September.\nconst monthKey   = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');\nconst quarterKey = d => d.getFullYear() + '-Q' + (Math.floor(d.getMonth() / 3) + 1);\nconst weekKey = function (d) {\n  const x = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));\n  const day = x.getUTCDay() || 7;\n  x.setUTCDate(x.getUTCDate() + 4 - day);\n  const start = new Date(Date.UTC(x.getUTCFullYear(), 0, 1));\n  const week = Math.ceil(((x - start) / 86400000 + 1) / 7);\n  return x.getUTCFullYear() + '-W' + String(week).padStart(2, '0');\n};\n\n// The periods to look at, newest first, and the day each one's invoice is due.\nfunction periodsFor(cadence, dueDay) {\n  const out = [];\n  if (cadence === 'monthly') {\n    for (let i = 0; i < LOOKBACK_PERIODS; i++) {\n      const d = new Date(today.getFullYear(), today.getMonth() - i, 1);\n      const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();\n      // The invoice for a month is due in the month AFTER it, on dueDay.\n      const due = new Date(d.getFullYear(), d.getMonth() + 1, Math.min(dueDay, lastDay));\n      out.push({ key: monthKey(d), due, label: 'the ' + monthKey(d) + ' invoice' });\n    }\n  } else if (cadence === 'quarterly') {\n    for (let i = 0; i < LOOKBACK_PERIODS; i++) {\n      const d = new Date(today.getFullYear(), today.getMonth() - (i * 3), 1);\n      const qStart = new Date(d.getFullYear(), Math.floor(d.getMonth() / 3) * 3, 1);\n      const due = new Date(qStart.getFullYear(), qStart.getMonth() + 3, Math.min(dueDay, 28));\n      out.push({ key: quarterKey(qStart), due, label: 'the ' + quarterKey(qStart) + ' invoice' });\n    }\n  } else if (cadence === 'weekly') {\n    for (let i = 0; i < LOOKBACK_PERIODS; i++) {\n      const d = new Date(today.getTime() - i * 7 * 86400000);\n      const due = new Date(d.getTime() + 7 * 86400000);\n      out.push({ key: weekKey(d), due, label: 'the week ' + weekKey(d) + ' invoice' });\n    }\n  }\n  return out;\n}\n\nconst actions = [];\nconst problems = [];\n\n// Index what has arrived and what has already been chased, by normalised\n// supplier. A loose name match here would close the wrong supplier's chase or\n// chase one that has already paid, so the key is exact after normalising.\nconst receivedKeys = new Set();\nreceived.forEach(function (r) {\n  const k = norm(r.supplier);\n  const p = clean(r.period);\n  if (k && p) receivedKeys.add(k + '|' + p);\n});\n\nconst chaseIndex = {};\nchases.forEach(function (c) {\n  const k = norm(c.supplier);\n  const p = clean(c.period);\n  if (!k || !p) return;\n  const id = k + '|' + p;\n  if (!chaseIndex[id]) chaseIndex[id] = { attempts: 0, escalated: false, last: null };\n  const entry = chaseIndex[id];\n  const action = clean(c.action).toLowerCase();\n  if (action === 'escalated') entry.escalated = true;\n  else entry.attempts += 1;\n  const when = parseDate(c.sent_at);\n  if (when && (!entry.last || when > entry.last)) entry.last = when;\n});\n\n// Group the register by the name we will match received rows against. Two rows\n// that are the same supplier typed twice get chased once, not twice. Two rows\n// that are genuinely different suppliers but collapse to the same key once\n// punctuation and \"Ltd\" style endings are removed cannot be told apart later,\n// so neither is chased and the clash is reported. Guessing there would either\n// chase a supplier who has already invoiced or leave a real one unchased.\nconst groups = {};\nregister.forEach(function (row) {\n  const supplier = clean(row.supplier);\n  if (!supplier) return;   // a blank row from the sheet, not a configuration fault\n  const k = norm(supplier);\n  if (!k) return;\n  if (!groups[k]) groups[k] = { rows: [], names: [] };\n  groups[k].rows.push(row);\n  if (groups[k].names.indexOf(supplier) === -1) groups[k].names.push(supplier);\n});\n\nObject.keys(groups).forEach(function (groupKey) {\n  const group = groups[groupKey];\n  if (group.names.length > 1) {\n    problems.push('these register rows cannot be told apart once punctuation and endings like Ltd are removed, so neither is chased: ' + group.names.join(' and '));\n    return;\n  }\n  const row = group.rows[0];\n  const supplier = clean(row.supplier);\n\n  const status = (clean(row.status) || 'active').toLowerCase();\n  if (status !== 'active') return;\n\n  const cadence = clean(row.cadence).toLowerCase();\n  if (['monthly', 'quarterly', 'weekly'].indexOf(cadence) === -1) {\n    problems.push(supplier + ': cadence reads \"' + clean(row.cadence) + '\", which is not monthly, quarterly or weekly');\n    return;\n  }\n\n  const dueDay = parseInt(clean(row.due_day), 10);\n  if (!Number.isFinite(dueDay) || dueDay < 1 || dueDay > 31) {\n    problems.push(supplier + ': due day reads \"' + clean(row.due_day) + '\", which is not a day of the month');\n    return;\n  }\n\n  const grace = Number.isFinite(parseInt(clean(row.grace_days), 10)) ? parseInt(clean(row.grace_days), 10) : GRACE_DAYS;\n  const key = groupKey;\n  const email = clean(row.email);\n  const emailLooksReal = email.indexOf('@') > 0 && email.indexOf('.', email.indexOf('@')) > 0;\n\n  periodsFor(cadence, dueDay).forEach(function (period) {\n    const id = key + '|' + period.key;\n\n    if (receivedKeys.has(id)) return;                    // it arrived\n    if (daysBetween(today, period.due) < grace) return;  // not late yet, and never chase a future period\n\n    const state = chaseIndex[id] || { attempts: 0, escalated: false, last: null };\n    if (state.escalated) return;                         // a person has it, stop chasing\n\n    const daysSinceLast = state.last ? daysBetween(today, state.last) : null;\n\n    // No usable address is not a reason to do nothing. It goes straight to a\n    // person, once, with the reason on it.\n    if (!emailLooksReal) {\n      if (state.attempts === 0) {\n        actions.push(build(row, period, 'escalated', 1, 'no usable email address on the register'));\n      }\n      return;\n    }\n\n    if (state.attempts === 0) {\n      actions.push(build(row, period, 'first reminder', 1, ''));\n    } else if (daysSinceLast !== null && daysSinceLast < REMINDER_GAP) {\n      return;                                            // still inside the gap, leave it alone\n    } else if (state.attempts < MAX_ATTEMPTS) {\n      actions.push(build(row, period, 'second reminder', state.attempts + 1, ''));\n    } else {\n      actions.push(build(row, period, 'escalated', state.attempts + 1,\n        'chased ' + state.attempts + ' times with no invoice'));\n    }\n  });\n});\n\nfunction build(row, period, action, attempt, reason) {\n  const daysLate = daysBetween(today, period.due);\n  return {\n    supplier: clean(row.supplier),\n    email: clean(row.email),\n    period: period.key,\n    period_label: period.label,\n    due_date: period.due.toISOString().slice(0, 10),\n    days_late: daysLate,\n    action: action,\n    attempt: attempt,\n    reason: reason,\n    reference: clean(row.reference),\n    escalate_to: clean(row.escalate_to),\n    cadence: clean(row.cadence).toLowerCase(),\n    checked_at: new Date().toISOString(),\n  };\n}\n\n// Oldest first, because the invoice that has been missing longest is the one\n// that matters, and a run that hits the ceiling should spend it on those.\nactions.sort(function (a, b) { return b.days_late - a.days_late; });\n\nconst capped = actions.slice(0, MAX_PER_RUN);\nconst heldBack = actions.length - capped.length;\n\nconst out = capped.map(function (a, i) {\n  a.configuration_problems = i === 0 ? problems.join('; ') : '';\n  a.held_back = i === 0 ? heldBack : 0;\n  return { json: a };\n});\n\n// A broken register stops invoices being chased, so it is reported on its own\n// item rather than riding along on a chase that may not exist. It is reported\n// every run until it is fixed, because silence would look like everything is\n// in order.\nif (problems.length) {\n  out.push({ json: {\n    action: 'configuration problem',\n    supplier: '', period: '', period_label: '', email: '', due_date: '',\n    days_late: 0, attempt: 0, reason: problems.join('; '),\n    configuration_problems: problems.join('; '),\n    held_back: heldBack, checked_at: new Date().toISOString(),\n  } });\n}\n\nif (!out.length) {\n  return [{ json: { action: 'nothing to chase', supplier: '', period: '', configuration_problems: '', held_back: 0 } }];\n}\n\nreturn out;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        300
+      ],
+      "id": "work-out-what-is-missing",
+      "name": "Work out what is missing"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "todo",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              },
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "nothing to chase"
+            }
+          ]
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        1000,
+        300
+      ],
+      "id": "anything-to-chase",
+      "name": "Anything to chase?"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "outputKey": "first",
+              "renameOutput": true,
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "first",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "first reminder"
+                  }
+                ]
+              }
+            },
+            {
+              "outputKey": "second",
+              "renameOutput": true,
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "second",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "second reminder"
+                  }
+                ]
+              }
+            },
+            {
+              "outputKey": "person",
+              "renameOutput": true,
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "person",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "escalated"
+                  }
+                ]
+              }
+            },
+            {
+              "outputKey": "register",
+              "renameOutput": true,
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "register",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "configuration problem"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        1200,
+        300
+      ],
+      "id": "first-second-or-person",
+      "name": "First reminder, second, or a person"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.email }}",
+        "subject": "=Missing invoice: {{ $json.period_label }}",
+        "message": "={{ 'Hello,\\n\\nWe have not received ' + $json.period_label + ' from you yet. It was due on ' + $json.due_date + ', which is ' + $json.days_late + ' days ago.' + ($json.reference ? '\\n\\nOur account reference is ' + $json.reference + '.' : '') + '\\n\\nIf it has already been sent, please reply to this email with a copy and we will match it up. If it has not, please send it when you can so we can schedule payment.\\n\\nAccounts Payable' }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1420,
+        120
+      ],
+      "id": "send-the-first-reminder",
+      "name": "Send the first reminder"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.email }}",
+        "subject": "=Second request: {{ $json.period_label }}",
+        "message": "={{ 'Hello,\\n\\nThis is a second request for ' + $json.period_label + ', which was due on ' + $json.due_date + ' and is now ' + $json.days_late + ' days overdue.' + ($json.reference ? ' Our account reference is ' + $json.reference + '.' : '') + '\\n\\nWe cannot schedule payment without it. If there is a reason it has not been issued, please tell us what it is and we will work around it.\\n\\nAccounts Payable' }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1420,
+        300
+      ],
+      "id": "send-the-second-reminder",
+      "name": "Send the second reminder"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "<__PLACEHOLDER_VALUE__Slack channel for accounts, e.g. #finance__>"
+        },
+        "text": "=A missing invoice needs a person.\\n{{ $json.supplier }}, {{ $json.period_label }}, due {{ $json.due_date }}, {{ $json.days_late }} days late.\\nWhy it is here: {{ $json.reason }}\\n{{ $json.escalate_to ? 'Owner: ' + $json.escalate_to : 'No owner set on the register' }}\\nNothing further will be sent to this supplier for this period.",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        1420,
+        480
+      ],
+      "id": "hand-it-to-a-person",
+      "name": "Hand it to a person"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "<__PLACEHOLDER_VALUE__Slack channel for accounts, e.g. #finance__>"
+        },
+        "text": "=The expected invoice register has a problem, so some suppliers are not being chased.\\n{{ $json.reason }}\\nFix the register and this message stops. It is sent every run until then, because a quiet morning would otherwise look like everything is in order.",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        1420,
+        660
+      ],
+      "id": "say-the-register-needs-fixing",
+      "name": "Say the register needs fixing"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  supplier: $('Work out what is missing').item.json.supplier,\n  period: $('Work out what is missing').item.json.period,\n  action: $('Work out what is missing').item.json.action,\n  attempt: $('Work out what is missing').item.json.attempt,\n  days_late: $('Work out what is missing').item.json.days_late,\n  sent_to: $('Work out what is missing').item.json.email,\n  reason: $('Work out what is missing').item.json.reason,\n  sent_at: new Date().toISOString()\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1640,
+        300
+      ],
+      "id": "build-the-chase-log-row",
+      "name": "Build the chase log row"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "<__PLACEHOLDER_VALUE__The Google Sheet holding your three tabs__>"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Chase log"
+        },
+        "operation": "append",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": [],
+          "value": {}
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1840,
+        300
+      ],
+      "id": "write-it-to-the-chase-log",
+      "name": "Write it to the chase log"
+    },
+    {
+      "parameters": {
+        "simple": false,
+        "filters": {
+          "labelIds": [
+            "<__PLACEHOLDER_VALUE__Gmail label your supplier invoices land in, e.g. Invoices__>"
+          ],
+          "hasAttachment": true
+        },
+        "options": {
+          "downloadAttachments": true
+        },
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        800
+      ],
+      "id": "an-invoice-arrives",
+      "name": "An invoice arrives"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": false,
+            "typeValidation": "loose"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "pdf",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "leftValue": "={{ Object.values($binary || {}).some(function(b){ return String(b && b.fileExtension || '').toLowerCase() === 'pdf' || String(b && b.mimeType || '') === 'application/pdf'; }) }}"
+            }
+          ]
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        200,
+        800
+      ],
+      "id": "keep-only-pdfs",
+      "name": "Keep only PDFs"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "={{ Object.keys($binary || {}).find(function(k){ return String($binary[k].fileExtension || '').toLowerCase() === 'pdf' || String($binary[k].mimeType || '') === 'application/pdf'; }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        400,
+        800
+      ],
+      "id": "read-the-pdf",
+      "name": "Read the PDF"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        560,
+        1000
+      ],
+      "id": "extraction-model",
+      "name": "Extraction model"
+    },
+    {
+      "parameters": {
+        "text": "={{ $json.text }}",
+        "schemaType": "fromJson",
+        "jsonSchemaExample": "{\n  \"supplier\": \"Midlands Fire Supplies Ltd\",\n  \"invoice_number\": \"INV-2041\",\n  \"issue_date\": \"2026-09-03\",\n  \"period_end\": \"2026-08-31\"\n}",
+        "options": {
+          "systemPromptTemplate": "You read supplier invoices and return four fields. Accuracy matters more than completeness.\n\n1. Return null for any field you cannot read with confidence. Never guess.\n2. Dates are ISO yyyy-mm-dd. If the format is ambiguous, prefer day first, which is the British and Gulf convention.\n3. supplier is who issued the invoice, not who received it.\n4. period_end is the last day of the service period the invoice covers, if the invoice states one. Look for wording such as 'for the period', 'service period', 'billing period' or a month named as the subject of the charge. Return null if the invoice does not say. Do not copy the issue date into it."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        600,
+        800
+      ],
+      "id": "read-who-it-is-from",
+      "name": "Read who it is from"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "<__PLACEHOLDER_VALUE__The Google Sheet holding your three tabs__>"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Expected invoices"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        800,
+        800
+      ],
+      "id": "expected-invoices-for-matching",
+      "name": "Expected invoices for matching",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Ties an invoice that has arrived to a row on the register, and works out\n// which period it closes. Nothing is written from here. A wrong match is worse\n// than no match, because it silently stops a chase for an invoice that never\n// came, so anything ambiguous is handed to a person instead of guessed.\n\nconst doc = $('Read who it is from').first().json.output || $('Read who it is from').first().json;\nconst register = $('Expected invoices for matching').all().map(i => i.json);\n\nconst norm = s => String(s == null ? '' : s).toLowerCase()\n  .replace(/\\b(ltd|limited|llc|l\\.l\\.c|plc|llp|inc|co|company|fzco|fze|fzc|est|establishment)\\b/g, '')\n  .replace(/[^a-z0-9]/g, '').trim();\n\nconst clean = v => String(v == null ? '' : v).trim();\n\nconst parseDate = v => {\n  const s = clean(v);\n  if (!s) return null;\n  const t = Date.parse(s);\n  return Number.isFinite(t) ? new Date(t) : null;\n};\n\nconst monthKey   = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');\nconst quarterKey = d => d.getFullYear() + '-Q' + (Math.floor(d.getMonth() / 3) + 1);\nconst weekKey = function (d) {\n  const x = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));\n  const day = x.getUTCDay() || 7;\n  x.setUTCDate(x.getUTCDate() + 4 - day);\n  const start = new Date(Date.UTC(x.getUTCFullYear(), 0, 1));\n  const week = Math.ceil(((x - start) / 86400000 + 1) / 7);\n  return x.getUTCFullYear() + '-W' + String(week).padStart(2, '0');\n};\n\nfunction fail(reason) {\n  return [{ json: {\n    matched: false,\n    reason: reason,\n    read_supplier: clean(doc.supplier),\n    invoice_number: clean(doc.invoice_number),\n    issue_date: clean(doc.issue_date),\n    period: '',\n    supplier: '',\n    period_inferred: false,\n    received_at: new Date().toISOString(),\n  } }];\n}\n\nconst readSupplier = clean(doc.supplier);\nif (!readSupplier) return fail('the supplier could not be read off the invoice');\n\nconst key = norm(readSupplier);\n\n// Exact on the normalised name first. A near match is accepted only when it is\n// the only one, and only when the name is long enough for \"contains\" to mean\n// anything. This is the same rule the posting workflow uses, and for the same\n// reason: two suppliers with similar names must never be treated as one.\nlet row = null;\nconst exact = register.filter(r => norm(r.supplier) === key);\nif (exact.length === 1) {\n  row = exact[0];\n} else if (exact.length > 1) {\n  return fail('\"' + readSupplier + '\" matches ' + exact.length + ' rows on the register, so a person picks the right one');\n} else if (key.length >= 5) {\n  const near = register.filter(function (r) {\n    const k = norm(r.supplier);\n    return k.length >= 5 && (k.indexOf(key) !== -1 || key.indexOf(k) !== -1);\n  });\n  if (near.length === 1) row = near[0];\n  else if (near.length > 1) return fail('\"' + readSupplier + '\" is close to ' + near.length + ' rows on the register, so a person picks the right one');\n}\n\nif (!row) return fail('\"' + readSupplier + '\" is not on the expected invoice register');\n\nconst cadence = clean(row.cadence).toLowerCase();\nif (['monthly', 'quarterly', 'weekly'].indexOf(cadence) === -1) {\n  return fail('the register row for \"' + clean(row.supplier) + '\" has cadence \"' + clean(row.cadence) + '\", which is not monthly, quarterly or weekly');\n}\n\n// Which period does this invoice close. An invoice that states the period it\n// covers is believed. Otherwise the register's billing convention decides, and\n// the row is marked inferred so a person can see it was not read off the paper.\nconst periodEnd = parseDate(doc.period_end);\nconst issued = parseDate(doc.issue_date);\nlet basis = periodEnd;\nlet inferred = false;\n\nif (!basis) {\n  if (!issued) return fail('neither a period nor a readable issue date is on the invoice');\n  inferred = true;\n  const billing = (clean(row.billing) || 'arrears').toLowerCase();\n  if (billing === 'advance') {\n    basis = issued;\n  } else if (cadence === 'monthly') {\n    basis = new Date(issued.getFullYear(), issued.getMonth() - 1, 15);\n  } else if (cadence === 'quarterly') {\n    basis = new Date(issued.getFullYear(), issued.getMonth() - 3, 15);\n  } else {\n    basis = new Date(issued.getTime() - 7 * 86400000);\n  }\n}\n\nconst period = cadence === 'monthly' ? monthKey(basis)\n             : cadence === 'quarterly' ? quarterKey(basis)\n             : weekKey(basis);\n\nreturn [{ json: {\n  matched: true,\n  reason: '',\n  supplier: clean(row.supplier),            // the register's spelling, so the chase index lines up\n  read_supplier: readSupplier,\n  invoice_number: clean(doc.invoice_number),\n  issue_date: issued ? issued.toISOString().slice(0, 10) : '',\n  period: period,\n  period_inferred: inferred,\n  received_at: new Date().toISOString(),\n} }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        800
+      ],
+      "id": "match-it-to-an-expected-invoice",
+      "name": "Match it to an expected invoice"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "matched",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "leftValue": "={{ $json.matched }}"
+            }
+          ]
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1200,
+        800
+      ],
+      "id": "did-it-match",
+      "name": "Did it match?"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "<__PLACEHOLDER_VALUE__The Google Sheet holding your three tabs__>"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Invoices received"
+        },
+        "operation": "append",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": [],
+          "value": {}
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1420,
+        720
+      ],
+      "id": "mark-the-invoice-received",
+      "name": "Mark the invoice received"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "<__PLACEHOLDER_VALUE__Slack channel for accounts, e.g. #finance__>"
+        },
+        "text": "=An invoice arrived that does not match the register, so no chase has been closed.\\nRead off the invoice: {{ $json.read_supplier || 'no supplier name' }}, number {{ $json.invoice_number || 'none' }}, dated {{ $json.issue_date || 'no date' }}.\\nWhy: {{ $json.reason }}\\nAdd the supplier to the register, or file this one by hand.",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        1420,
+        900
+      ],
+      "id": "say-it-did-not-match",
+      "name": "Say it did not match"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        1250
+      ],
+      "id": "when-a-run-fails",
+      "name": "When a run fails"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "<__PLACEHOLDER_VALUE__Slack channel for alerts, e.g. #ops-alerts__>"
+        },
+        "text": "=Invoice chasing failed on \"{{ $json.execution.lastNodeExecuted }}\".\\n{{ $json.execution.error.message }}\\nNo reminder was sent after that point. Open the execution and rerun it once the cause is fixed.",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        200,
+        1250
+      ],
+      "id": "say-the-run-failed",
+      "name": "Say the run failed"
+    },
+    {
+      "parameters": {
+        "width": 520,
+        "height": 420,
+        "content": "## Chase the supplier invoices that never arrived\n\n**Who it is for.** Anyone running a purchase ledger who knows roughly what should turn up each month and spends the last week of every month working out what did not. Finance teams call this the missing invoice inbox, and it is usually one person's whole job.\n\n**What it does.** You list what you expect and how often. Every morning it works out which of those has not arrived, sends the supplier a reminder, sends a second one if that is ignored, and then hands it to a person instead of nagging forever. When an invoice does arrive it reads who it is from, ties it to the right period and stops the clock.\n\n**What it will not do.** It never chases a period that is not late yet, never chases twice inside the reminder gap, never chases after a person has taken it over, and never marks an invoice received against a supplier it is not certain about."
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        200
+      ],
+      "id": "read-me-first",
+      "name": "Read me first"
+    },
+    {
+      "parameters": {
+        "width": 520,
+        "height": 460,
+        "content": "## Setup\n\n**1. One Google Sheet, three tabs.** Named exactly `Expected invoices`, `Invoices received` and `Chase log`. Columns are in the note on the right.\n\n**2. Fill in the register.** One row per supplier you expect a regular invoice from. This is the whole configuration, and it is the part worth an hour of your time.\n\n**3. Credentials.** Google Sheets, Gmail, OpenAI and Slack.\n\n**4. Gmail label.** Point the trigger at the label your invoices land in. The chase lane and the arrival lane are independent, so you can run one without the other.\n\n**5. Tunables.** Open *Work out what is missing*. The block at the top sets how far back to look, the grace period, the gap between reminders, how many reminders before a person takes over, and the ceiling on one run.\n\n**Start with the ceiling low.** `MAX_PER_RUN` ships at 20. On the first morning, set it to 2, read what it sends, then raise it."
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        680
+      ],
+      "id": "setup",
+      "name": "Setup"
+    },
+    {
+      "parameters": {
+        "width": 460,
+        "height": 660,
+        "content": "### The rules that decide a chase\n\nThey are all in *Work out what is missing*, in order.\n\n1. A paused row is skipped. A blank row is skipped silently; a row with a cadence or due day that does not parse is reported as a configuration problem, not skipped quietly.\n2. Only the last three periods are considered, so a first run on an old register does not chase years of history.\n3. A period is not late until the due date plus the grace days. A future period is never chased.\n4. If the invoice is on `Invoices received` for that supplier and period, nothing happens.\n5. If a person has already taken it over, nothing happens. Escalation is final.\n6. Inside the reminder gap, nothing happens. This is what stops the same supplier getting an email every morning.\n7. No usable email address on the register sends it straight to a person, once, with that as the reason.\n8. First reminder, then second, then a person.\n9. The run is capped. Anything held back is counted and the oldest go first, because the invoice missing longest is the one that matters.\n\n**The chase log is the memory.** Nothing else records that a reminder went out, so if the append fails the same reminder can go twice. Watch that node.",
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2060,
+        180
+      ],
+      "id": "the-rules-that-decide-a-chase",
+      "name": "The rules that decide a chase"
+    },
+    {
+      "parameters": {
+        "width": 460,
+        "height": 440,
+        "content": "### What goes in the three tabs\n\n**Expected invoices** (you fill this in)\n`supplier`, `email`, `cadence` (monthly, quarterly or weekly), `due_day` (day of the month the invoice should be with you), `grace_days`, `billing` (arrears or advance, arrears if blank), `status` (active or paused), `reference` (your account number with them), `escalate_to`, `notes`\n\n**Invoices received** (written by the arrival lane)\n`supplier`, `period`, `invoice_number`, `issue_date`, `received_at`, `period_inferred`\n\n**Chase log** (written by the chase lane)\n`supplier`, `period`, `action`, `attempt`, `days_late`, `sent_to`, `reason`, `sent_at`\n\n`period_inferred` is `true` when the invoice did not state the period it covers and the register's billing convention was used to work it out. Worth a glance when a supplier's dates look odd.",
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2060,
+        900
+      ],
+      "id": "what-goes-in-the-three-tabs",
+      "name": "What goes in the three tabs"
+    }
+  ],
+  "connections": {
+    "Every morning": {
+      "main": [
+        [
+          {
+            "node": "Expected invoices",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expected invoices": {
+      "main": [
+        [
+          {
+            "node": "Invoices received",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Invoices received": {
+      "main": [
+        [
+          {
+            "node": "Chase log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chase log": {
+      "main": [
+        [
+          {
+            "node": "Work out what is missing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Work out what is missing": {
+      "main": [
+        [
+          {
+            "node": "Anything to chase?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anything to chase?": {
+      "main": [
+        [
+          {
+            "node": "First reminder, second, or a person",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "First reminder, second, or a person": {
+      "main": [
+        [
+          {
+            "node": "Send the first reminder",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send the second reminder",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hand it to a person",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Say the register needs fixing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send the first reminder": {
+      "main": [
+        [
+          {
+            "node": "Build the chase log row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send the second reminder": {
+      "main": [
+        [
+          {
+            "node": "Build the chase log row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hand it to a person": {
+      "main": [
+        [
+          {
+            "node": "Build the chase log row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build the chase log row": {
+      "main": [
+        [
+          {
+            "node": "Write it to the chase log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "An invoice arrives": {
+      "main": [
+        [
+          {
+            "node": "Keep only PDFs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keep only PDFs": {
+      "main": [
+        [
+          {
+            "node": "Read the PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read the PDF": {
+      "main": [
+        [
+          {
+            "node": "Read who it is from",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraction model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Read who it is from",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read who it is from": {
+      "main": [
+        [
+          {
+            "node": "Expected invoices for matching",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expected invoices for matching": {
+      "main": [
+        [
+          {
+            "node": "Match it to an expected invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match it to an expected invoice": {
+      "main": [
+        [
+          {
+            "node": "Did it match?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Did it match?": {
+      "main": [
+        [
+          {
+            "node": "Mark the invoice received",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Say it did not match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When a run fails": {
+      "main": [
+        [
+          {
+            "node": "Say the run failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}
