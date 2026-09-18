@@ -375,7 +375,7 @@
           "labelIds": [
             "<__PLACEHOLDER_VALUE__Gmail label your supplier invoices land in, e.g. Invoices__>"
           ],
-          "hasAttachment": true
+          "q": "has:attachment"
         },
         "options": {
           "downloadAttachments": true

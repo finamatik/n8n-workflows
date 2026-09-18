@@ -3,7 +3,7 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## Process store orders from webhook to supplier, shipping, CRM and ERP with stock checks\n\n**Who it is for.** Online stores and trading companies that still update supplier, shipping, CRM and ERP by hand after every order.\n\n**What it does**\n- Verifies the store webhook signature on the raw body, normalises the order and de-duplicates by order id.\n- Checks stock with the supplier. In stock: purchase order, shipping label with tracking, customer email, CRM upsert, ERP inventory update.\n- Out of stock: BACKORDER tag, customer email with the lead time, alert to operations.\n- A scheduled branch syncs ERP inventory to the CRM every six hours and posts a low stock digest.\n- Retries on every API call; bad signatures dropped and alerted; duplicates acknowledged and not re-run.\n\n**Setup**\n1. Set base and the store signing secret in Config, or swap each HTTP Request node for your store, supplier, carrier, CRM and ERP nodes.\n2. Register the Webhook URL as the store's order created webhook.\n3. Activate; the six hourly schedule runs the inventory sync.\n\nAll external systems are reached through HTTP Request nodes against `base` in the Config node, so the whole flow imports and runs against any REST backend; swap any of them for the native n8n node of your system. Built and tested on sample data by Finamatik: https://finamatik.com/work/order-to-fulfilment\n\n**Requirements.** n8n 1.100 or later; for the AI steps, a model endpoint at `base`/llm/complete or the OpenAI or Anthropic node in its place; your own systems reachable over HTTPS.\n\n**How to customise.** Every rule lives in one Code or Config node and is named for what it decides; change the thresholds there, not in the branches.",
+        "content": "## Process store orders from webhook to supplier, shipping, CRM and ERP with stock checks\n\n**Who it is for.** Online stores and trading companies that still update supplier, shipping, CRM and ERP by hand after every order.\n\n**What it does**\n- Verifies the store webhook signature on the raw body, normalises every line of the order, and de-duplicates by order id. An order is marked handled only after the work is done, so an attempt that fails half way is retried by the store rather than skipped.\n- Checks stock with the supplier for all lines. In stock: one purchase order carrying every line, one shipping label with tracking, one customer message naming every product, CRM upsert, ERP inventory update per SKU.\n- Out of stock, in whole or in part: BACKORDER tag, customer message with the lead time, alert to operations. Nothing is shipped as if complete.\n- A product that is not in the SKU map is held and reported, never ordered from the supplier under a placeholder code.\n- No email on the order is not a reason to refuse it: the goods ship, the message goes by SMS, and with no contact at all operations is told.\n- A scheduled branch syncs ERP inventory to the CRM every six hours and posts a low stock digest, reading either response shape the ERP may use.\n- Retries on every API call; bad signatures dropped and alerted; duplicates acknowledged and not re-run.\n\n**Setup**\n1. Set base and the store signing secret in Config, or swap each HTTP Request node for your store, supplier, carrier, CRM and ERP nodes.\n2. Register the Webhook URL as the store's order created webhook.\n3. Activate; the six hourly schedule runs the inventory sync.\n\nAll external systems are reached through HTTP Request nodes against `base` in the Config node, so the whole flow imports and runs against any REST backend; swap any of them for the native n8n node of your system. Built and tested on sample data by Finamatik: https://finamatik.com/work/order-to-fulfilment\n\n**Requirements.** n8n 1.100 or later; for the AI steps, a model endpoint at `base`/llm/complete or the OpenAI or Anthropic node in its place; your own systems reachable over HTTPS.\n\n**How to customise.** Every rule lives in one Code or Config node and is named for what it decides; change the thresholds there, not in the branches.",
         "height": 1000,
         "width": 560,
         "color": 1
@@ -70,7 +70,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// 1) Verify the store's HMAC signature on the raw body before trusting anything.\nconst crypto = require('crypto');\nconst cfg = $('Config').first().json;\nconst item = $('Webhook: store order paid (Shopify / WooCommerce / Salla)').first();\nconst headers = item.json.headers || {};\nconst raw = item.binary?.data ? Buffer.from(item.binary.data.data, 'base64').toString() : JSON.stringify(item.json.body || {});\nconst expected = crypto.createHmac('sha256', cfg.webhook_secret).update(raw).digest('base64');\nconst given = headers['x-shopify-hmac-sha256'] || headers['x-sample-hmac'] || '';\nif (given !== expected) throw new Error('Webhook signature mismatch, request dropped');\nconst o = item.json.body || JSON.parse(raw);\n// 2) Normalise\nconst map = JSON.parse(cfg.sku_map);\nconst li = (o.line_items || [])[0] || {};\nconst order = {\n  order_id: 'SH-' + (o.order_number || o.id), channel: o.channel || 'Shopify',\n  customer: [o.customer?.first_name, o.customer?.last_name].filter(Boolean).join(' ') || o.customer?.name || 'Unknown',\n  email: (o.email || o.customer?.email || '').toLowerCase(), phone: o.phone || o.customer?.phone || '',\n  product: li.title, sku: li.sku || map[li.title] || 'UNMAPPED', qty: Number(li.quantity || 1), amount: Number(o.total_price || 0),\n  ship_to: o.shipping_address || {}, base: cfg.base, received_at: new Date().toISOString()\n};\nif (!order.email) throw new Error('Order without customer email');\n// 3) Idempotency: same order id twice = second delivery ignored\nconst seen = $getWorkflowStaticData('global'); seen.orders = seen.orders || {};\norder.duplicate = !!seen.orders[order.order_id]; seen.orders[order.order_id] = Date.now();\nreturn [{ json: order }];"
+        "jsCode": "// 1) Verify the store's HMAC signature on the raw body before trusting anything.\nconst crypto = require('crypto');\nconst cfg = $('Config').first().json;\nconst item = $('Webhook: store order paid (Shopify / WooCommerce / Salla)').first();\nconst headers = item.json.headers || {};\nconst raw = item.binary?.data ? Buffer.from(item.binary.data.data, 'base64').toString() : JSON.stringify(item.json.body || {});\nconst expected = crypto.createHmac('sha256', cfg.webhook_secret).update(raw).digest('base64');\nconst given = headers['x-shopify-hmac-sha256'] || headers['x-sample-hmac'] || '';\nif (given !== expected) throw new Error('Webhook signature mismatch, request dropped');\nconst o = item.json.body || JSON.parse(raw);\n\n// 2) Normalise EVERY line, not only the first. An order with three products is\n//    three lines on one purchase order, one label and one email.\nconst map = JSON.parse(cfg.sku_map);\nconst lines = (o.line_items || []).map(li => ({\n  title: li.title || '',\n  sku: li.sku || map[li.title] || '',\n  qty: Number(li.quantity || 1),\n}));\nconst unmapped = lines.filter(l => !l.sku).map(l => l.title || '(untitled line)');\nif (!lines.length) throw new Error('Order has no line items');\n\nconst email = String(o.email || o.customer?.email || '').toLowerCase().trim();\nconst phone = String(o.phone || o.customer?.phone || o.shipping_address?.phone || '').trim();\n\nconst order = {\n  order_id: 'SH-' + (o.order_number || o.id), channel: o.channel || 'Shopify',\n  customer: [o.customer?.first_name, o.customer?.last_name].filter(Boolean).join(' ') || o.customer?.name || 'Unknown',\n  email, phone,\n  // How to tell the customer. No email is not a reason to refuse the order;\n  // the goods still ship, the message goes by SMS, and with neither we tell ops.\n  contact_channel: email ? 'email' : (phone ? 'sms' : ''),\n  contact_to: email || phone || '',\n  lines, unmapped,\n  products: lines.map(l => l.qty + ' x ' + l.title).join(', '),\n  // Kept for anything that still reads the old single fields.\n  product: lines[0].title, sku: lines[0].sku, qty: lines[0].qty,\n  amount: Number(o.total_price || 0),\n  ship_to: o.shipping_address || {}, base: cfg.base, received_at: new Date().toISOString(),\n};\n\n// 3) Idempotency: has this order id already been COMPLETED. It is marked in\n//    \"Respond to webhook\", after the work, so an attempt that fails half way\n//    is retried by the store instead of being skipped as a duplicate.\nconst seen = $getWorkflowStaticData('global'); seen.orders = seen.orders || {};\norder.duplicate = !!seen.orders[order.order_id];\nreturn [{ json: order }];"
       },
       "name": "Verify HMAC, normalise, idempotency",
       "type": "n8n-nodes-base.code",
@@ -117,14 +117,14 @@
         "url": "={{ $json.base }}/supplier/stock",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ sku: $json.sku, qty: $json.qty }) }}",
+        "jsonBody": "={{ JSON.stringify({ order_id: $json.order_id, lines: $json.lines }) }}",
         "options": {}
       },
       "name": "Supplier API: stock check",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        900,
+        1120,
         200
       ],
       "retryOnFail": true,
@@ -158,7 +158,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        1120,
+        1340,
         200
       ]
     },
@@ -168,14 +168,14 @@
         "url": "={{ $('Verify HMAC, normalise, idempotency').first().json.base }}/supplier/orders",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ order_id: $('Verify HMAC, normalise, idempotency').first().json.order_id, sku: $('Verify HMAC, normalise, idempotency').first().json.sku, qty: $('Verify HMAC, normalise, idempotency').first().json.qty, ship_to: $('Verify HMAC, normalise, idempotency').first().json.ship_to }) }}",
+        "jsonBody": "={{ JSON.stringify({ order_id: $('Verify HMAC, normalise, idempotency').first().json.order_id, lines: $('Verify HMAC, normalise, idempotency').first().json.lines, ship_to: $('Verify HMAC, normalise, idempotency').first().json.ship_to }) }}",
         "options": {}
       },
       "name": "Supplier API: place PO",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1340,
+        1560,
         100
       ],
       "retryOnFail": true,
@@ -195,7 +195,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1560,
+        1780,
         100
       ],
       "retryOnFail": true,
@@ -208,16 +208,19 @@
         "url": "={{ $('Verify HMAC, normalise, idempotency').first().json.base }}/messages/send",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ channel: 'email', to: $('Verify HMAC, normalise, idempotency').first().json.email, body: 'Hi ' + $('Verify HMAC, normalise, idempotency').first().json.customer.split(' ')[0] + ', your ' + $('Verify HMAC, normalise, idempotency').first().json.product + ' is on its way. ' + $json.carrier + ' tracking: ' + $json.tracking }) }}",
+        "jsonBody": "={{ JSON.stringify({ channel: $('Verify HMAC, normalise, idempotency').first().json.contact_channel, to: $('Verify HMAC, normalise, idempotency').first().json.contact_to, body: 'Hi ' + $('Verify HMAC, normalise, idempotency').first().json.customer.split(' ')[0] + ', your order (' + $('Verify HMAC, normalise, idempotency').first().json.products + ') is on its way. ' + $json.carrier + ' tracking: ' + $json.tracking }) }}",
         "options": {}
       },
       "name": "Customer: shipping email",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1780,
+        2000,
         100
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
@@ -232,9 +235,12 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2000,
+        2220,
         100
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
@@ -242,16 +248,19 @@
         "url": "={{ $('Verify HMAC, normalise, idempotency').first().json.base }}/erp/inventory/upsert",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ sku: $('Verify HMAC, normalise, idempotency').first().json.sku, qty: $('Supplier API: stock check').first().json.available - $('Verify HMAC, normalise, idempotency').first().json.qty }) }}",
+        "jsonBody": "={{ JSON.stringify({ lines: ($('Supplier API: stock check').first().json.lines || []).map(function (l) { var o = $('Verify HMAC, normalise, idempotency').first().json.lines.find(function (x) { return x.sku === l.sku; }); return { sku: l.sku, qty: Number(l.available || 0) - (o ? Number(o.qty) : 0) }; }) }) }}",
         "options": {}
       },
       "name": "ERP: inventory sync",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2220,
+        2440,
         100
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
@@ -266,9 +275,12 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1340,
+        1560,
         360
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
@@ -276,16 +288,19 @@
         "url": "={{ $('Verify HMAC, normalise, idempotency').first().json.base }}/messages/send",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ channel: 'email', to: $('Verify HMAC, normalise, idempotency').first().json.email, body: 'Hi ' + $('Verify HMAC, normalise, idempotency').first().json.customer.split(' ')[0] + ', your ' + $('Verify HMAC, normalise, idempotency').first().json.product + ' is on backorder; current lead time ' + $('Supplier API: stock check').first().json.lead_days + ' days. Reply if you would like to change or cancel.' }) }}",
+        "jsonBody": "={{ JSON.stringify({ channel: $('Verify HMAC, normalise, idempotency').first().json.contact_channel, to: $('Verify HMAC, normalise, idempotency').first().json.contact_to, body: 'Hi ' + $('Verify HMAC, normalise, idempotency').first().json.customer.split(' ')[0] + ', part of your order (' + $('Verify HMAC, normalise, idempotency').first().json.products + ') is on backorder; current lead time ' + $('Supplier API: stock check').first().json.lead_days + ' days. Reply if you would like to wait, swap, or cancel.' }) }}",
         "options": {}
       },
       "name": "Customer: backorder email",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1560,
+        1780,
         360
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
@@ -293,26 +308,29 @@
         "url": "={{ $('Verify HMAC, normalise, idempotency').first().json.base }}/alerts",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ channel: '#ops-backorders', text: 'BACKORDER ' + $('Verify HMAC, normalise, idempotency').first().json.order_id + ' ' + $('Verify HMAC, normalise, idempotency').first().json.sku + ' x' + $('Verify HMAC, normalise, idempotency').first().json.qty + ', supplier lead ' + $('Supplier API: stock check').first().json.lead_days + 'd' }) }}",
+        "jsonBody": "={{ JSON.stringify({ channel: '#ops-backorders', text: 'BACKORDER ' + $('Verify HMAC, normalise, idempotency').first().json.order_id + ': ' + $('Verify HMAC, normalise, idempotency').first().json.products + ', supplier lead ' + $('Supplier API: stock check').first().json.lead_days + 'd' }) }}",
         "options": {}
       },
       "name": "Ops alert (Slack)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1780,
+        2000,
         360
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
-        "jsCode": "const o = $('Verify HMAC, normalise, idempotency').first().json;\nconst stock = $('Supplier API: stock check').first().json;\nlet tracking = null; try { tracking = $('Shipping API: create label + tracking').first().json.tracking; } catch (e) {}\nreturn [{ json: { ok: true, order_id: o.order_id, sku: o.sku, route: stock.ok ? 'fulfilled' : 'backorder', tracking, lead_days: stock.lead_days } }];"
+        "jsCode": "const o = $('Verify HMAC, normalise, idempotency').first().json;\nlet stock = null; try { stock = $('Supplier API: stock check').first().json; } catch (e) {}\nlet tracking = null; try { tracking = $('Shipping API: create label + tracking').first().json.tracking; } catch (e) {}\nconst route = o.unmapped.length ? 'held' : (stock && stock.ok ? 'fulfilled' : 'backorder');\n\n// Only now is the order marked as handled. A run that died before this line\n// leaves the id unmarked, so the store's retry does the work.\nconst seen = $getWorkflowStaticData('global'); seen.orders = seen.orders || {};\nseen.orders[o.order_id] = Date.now();\n\nreturn [{ json: {\n  ok: true, order_id: o.order_id, route, lines: o.lines.length, tracking,\n  lead_days: stock ? stock.lead_days : null,\n  note: o.unmapped.length ? 'not ordered, unmapped product: ' + o.unmapped.join(', ') : (o.contact_channel ? '' : 'customer has no email or phone, ops told'),\n} }];"
       },
       "name": "Respond to webhook",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2440,
+        2660,
         300
       ]
     },
@@ -359,13 +377,16 @@
       "position": [
         440,
         760
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
-        "jsCode": "const items = $input.first().json.items || [];\nconst low = items.filter(i => i.qty <= 5);\nreturn [{ json: { checked: items.length, low_stock: low, text: low.length ? 'Low stock: ' + low.map(i => i.sku + '=' + i.qty).join(', ') : 'All SKUs above threshold' } }];"
+        "jsCode": "// The ERP may answer with one object holding an items array, or with one item\n// per SKU when n8n splits a bare array. Reading only .items reported \"all\n// above threshold\" on the second shape, which is the silent kind of wrong.\nconst first = $input.first().json || {};\nconst rows = Array.isArray(first.items) ? first.items : $input.all().map(i => i.json);\nconst items = rows.filter(r => r && r.sku !== undefined && r.sku !== null && String(r.sku) !== '');\nconst low = items.filter(i => Number(i.qty) <= 5);\nreturn [{ json: {\n  checked: items.length,\n  low_stock: low,\n  text: !items.length ? 'Inventory sync: nothing came back from the ERP, check the connection'\n      : low.length ? 'Low stock: ' + low.map(i => i.sku + '=' + i.qty).join(', ')\n      : 'All SKUs above threshold',\n} }];"
       },
-      "name": "Low-stock rule (≤5)",
+      "name": "Low-stock rule (\u22645)",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
@@ -388,7 +409,10 @@
       "position": [
         660,
         760
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {},
@@ -415,7 +439,10 @@
       "position": [
         440,
         1000
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
@@ -477,6 +504,116 @@
         -600,
         1080
       ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Verify HMAC, normalise, idempotency').first().json.base }}/alerts",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ channel: '#ops-alerts', text: 'HELD ' + $('Verify HMAC, normalise, idempotency').first().json.order_id + ': product not in the sku map, nothing ordered: ' + $('Verify HMAC, normalise, idempotency').first().json.unmapped.join(', ') }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        700
+      ],
+      "id": "ops-alert-unmapped",
+      "name": "Ops alert: unmapped product",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Verify HMAC, normalise, idempotency').first().json.base }}/alerts",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ channel: '#ops-alerts', text: 'SHIPPED WITHOUT NOTICE ' + $('Verify HMAC, normalise, idempotency').first().json.order_id + ': the order has no email or phone, so the customer was not told. Tracking ' + $('Shipping API: create label + tracking').first().json.tracking }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        700
+      ],
+      "id": "ops-alert-no-contact",
+      "name": "Ops alert: no contact details",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "every-line-mapped",
+              "leftValue": "={{ $json.unmapped.length === 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        560,
+        500
+      ],
+      "id": "every-line-mapped",
+      "name": "Every line mapped?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "can-we-notify",
+              "leftValue": "={{ $('Verify HMAC, normalise, idempotency').first().json.contact_channel !== '' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1320,
+        500
+      ],
+      "id": "can-we-notify",
+      "name": "Can we notify?"
     }
   ],
   "connections": {
@@ -517,7 +654,7 @@
       "main": [
         [
           {
-            "node": "Supplier API: stock check",
+            "node": "Every line mapped?",
             "type": "main",
             "index": 0
           }
@@ -575,7 +712,7 @@
       "main": [
         [
           {
-            "node": "Customer: shipping email",
+            "node": "Can we notify?",
             "type": "main",
             "index": 0
           }
@@ -663,14 +800,14 @@
       "main": [
         [
           {
-            "node": "Low-stock rule (≤5)",
+            "node": "Low-stock rule (\u22645)",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Low-stock rule (≤5)": {
+    "Low-stock rule (\u22645)": {
       "main": [
         [
           {
@@ -708,6 +845,64 @@
         [
           {
             "node": "Alert ops",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every line mapped?": {
+      "main": [
+        [
+          {
+            "node": "Supplier API: stock check",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ops alert: unmapped product",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ops alert: unmapped product": {
+      "main": [
+        [
+          {
+            "node": "Respond to webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Can we notify?": {
+      "main": [
+        [
+          {
+            "node": "Customer: shipping email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ops alert: no contact details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ops alert: no contact details": {
+      "main": [
+        [
+          {
+            "node": "CRM: upsert customer + order",
             "type": "main",
             "index": 0
           }

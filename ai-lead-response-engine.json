@@ -3,7 +3,7 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## Score inbound leads with AI, reply by SMS or WhatsApp, book calendar slots and alert sales\n\n**Who it is for.** Sales teams that lose leads in the first hour: agencies, clinics, real estate, B2B services.\n\n**What it does**\n- Normalises the lead from any source (web form, ad platform, HubSpot or GoHighLevel webhook) with a 24 hour duplicate guard.\n- AI qualification returns a score, intent, summary and a drafted reply.\n- Hot leads get an instant SMS or WhatsApp reply, three calendar slots, a 15 minute sales task and a Slack alert.\n- Cooler leads are logged in the CRM and started on a nurture sequence.\n- A second trigger takes voice agent call ended webhooks (Retell, VAPI), writes the summary to the CRM and books a visit when asked.\n\n**Setup**\n1. Set base in Config or replace the HTTP Request nodes with your CRM, calendar, messaging and Slack nodes.\n2. Point the form, ad platform and voice agent webhooks at the two Webhook URLs.\n3. Set the AI credential on the qualification step. Activate.\n\nAll external systems are reached through HTTP Request nodes against `base` in the Config node, so the whole flow imports and runs against any REST backend; swap any of them for the native n8n node of your system. Built and tested on sample data by Finamatik: https://finamatik.com/work/ai-lead-response-engine\n\n**Requirements.** n8n 1.100 or later; for the AI steps, a model endpoint at `base`/llm/complete or the OpenAI or Anthropic node in its place; your own systems reachable over HTTPS.\n\n**How to customise.** Every rule lives in one Code or Config node and is named for what it decides; change the thresholds there, not in the branches.",
+        "content": "## Score inbound leads with AI, reply by SMS or WhatsApp, book calendar slots and alert sales\n\n**Who it is for.** Sales teams that lose leads in the first hour: agencies, clinics, real estate, B2B services.\n\n**What it does**\n- Normalises the lead from any source (web form, ad platform, HubSpot or GoHighLevel webhook) with a 24 hour duplicate guard.\n- AI qualification returns a score from 0 to 100, intent, summary and a drafted reply. The threshold in Config is on the same scale. An empty draft is never sent; the slots, the rep task and the alert still happen.\n- A lead with no email or phone is answered with a reason and handed to operations, not thrown back at the form as a 500. A lead is marked handled only after the work is done, so a failed attempt is retried by the platform.\n- Calendar full: the lead is told a colleague will call, and a call is never confirmed as booked unless a slot was actually booked.\n- Hot leads get an instant SMS or WhatsApp reply, three calendar slots, a 15 minute sales task and a Slack alert.\n- Cooler leads are logged in the CRM and started on a nurture sequence.\n- A second trigger takes voice agent call ended webhooks (Retell, VAPI), writes the summary to the CRM and books a visit when asked.\n\n**Setup**\n1. Set base in Config or replace the HTTP Request nodes with your CRM, calendar, messaging and Slack nodes.\n2. Point the form, ad platform and voice agent webhooks at the two Webhook URLs.\n3. Set the AI credential on the qualification step. Activate.\n\nAll external systems are reached through HTTP Request nodes against `base` in the Config node, so the whole flow imports and runs against any REST backend; swap any of them for the native n8n node of your system. Built and tested on sample data by Finamatik: https://finamatik.com/work/ai-lead-response-engine\n\n**Requirements.** n8n 1.100 or later; for the AI steps, a model endpoint at `base`/llm/complete or the OpenAI or Anthropic node in its place; your own systems reachable over HTTPS.\n\n**How to customise.** Every rule lives in one Code or Config node and is named for what it decides; change the thresholds there, not in the branches.",
         "height": 1000,
         "width": 560,
         "color": 1
@@ -89,7 +89,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Normalise any lead source into one shape and drop duplicates within 24h (workflow static data).\nconst body = $input.first().json.body || $input.first().json;\nconst cfg = $('Config').first().json;\nconst lead = {\n  name: body.name || body.full_name || [body.first_name, body.last_name].filter(Boolean).join(' ') || 'Unknown',\n  email: (body.email || '').toLowerCase().trim(),\n  phone: (body.phone || body.phone_number || '').replace(/[^+\\d]/g, ''),\n  service: body.service || body.interest || body.form_name || 'general enquiry',\n  message: body.message || body.notes || body.comments || '',\n  source: body.source || body.utm_source || 'web-form',\n  company: body.company || '', budget: body.budget || '',\n  received_at: new Date().toISOString()\n};\nif (!lead.email && !lead.phone) throw new Error('Lead has neither email nor phone, rejected');\nconst key = lead.email || lead.phone;\nconst seen = $getWorkflowStaticData('global'); seen.leads = seen.leads || {};\nconst last = seen.leads[key];\nlead.duplicate = !!(last && Date.now() - last < 24*3600*1000);\nseen.leads[key] = Date.now();\nreturn [{ json: { ...lead, cfg } }];"
+        "jsCode": "// Normalise any lead source into one shape and drop duplicates within 24h (workflow static data).\nconst body = $input.first().json.body || $input.first().json;\nconst cfg = $('Config').first().json;\nconst lead = {\n  name: body.name || body.full_name || [body.first_name, body.last_name].filter(Boolean).join(' ') || 'Unknown',\n  email: (body.email || '').toLowerCase().trim(),\n  phone: (body.phone || body.phone_number || '').replace(/[^+\\d]/g, ''),\n  service: body.service || body.interest || body.form_name || 'general enquiry',\n  message: body.message || body.notes || body.comments || '',\n  source: body.source || body.utm_source || 'web-form',\n  company: body.company || '', budget: body.budget || '',\n  received_at: new Date().toISOString()\n};\n// A lead with no way to reach them is not an error to throw, because a thrown\n// error answers the form platform with a 500 and it retries the same lead\n// for hours. It is answered with a reason and handed to a person.\nlead.usable = !!(lead.email || lead.phone);\nlead.reject_reason = lead.usable ? '' : 'neither email nor phone on the lead';\n\n// Duplicate within 24h. The seen list is only READ here and written in\n// \"Respond to webhook\" once the lead has actually been handled, so a run that\n// fails at the model or the CRM leaves the lead unmarked and the platform's\n// retry handles it instead of skipping it.\nconst key = lead.email || lead.phone || '';\nconst seen = $getWorkflowStaticData('global'); seen.leads = seen.leads || {};\nconst last = key ? seen.leads[key] : null;\nlead.duplicate = !!(last && Date.now() - last < 24*3600*1000);\nreturn [{ json: { ...lead, cfg } }];"
       },
       "name": "Normalise + dedupe (24h)",
       "type": "n8n-nodes-base.code",
@@ -126,7 +126,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        660,
+        880,
         300
       ]
     },
@@ -136,7 +136,7 @@
         "url": "={{ $json.cfg.base }}/llm/complete",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ task: 'qualify_lead', input: { name: $json.name, service: $json.service, message: $json.message, company: $json.company, budget: $json.budget } }) }}",
+        "jsonBody": "={{ JSON.stringify({ task: 'qualify_lead', score_scale: '0 to 100, where 70 and above is worth a call within the hour', input: { name: $json.name, service: $json.service, message: $json.message, company: $json.company, budget: $json.budget } }) }}",
         "options": {
           "timeout": 30000
         }
@@ -145,7 +145,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        900,
+        1100,
         200
       ],
       "retryOnFail": true,
@@ -155,13 +155,13 @@
     },
     {
       "parameters": {
-        "jsCode": "const lead = $('Normalise + dedupe (24h)').first().json;\nconst ai = $input.first().json.output || {};\nconst score = Number(ai.score ?? 0);\nreturn [{ json: { ...lead, ai, score, hot: score >= lead.cfg.hot_threshold, usage: $input.first().json.usage } }];"
+        "jsCode": "const lead = $('Normalise + dedupe (24h)').first().json;\nlet ai = $input.first().json.output;\nif (typeof ai === 'string') { try { ai = JSON.parse(ai); } catch (e) { ai = { reply: ai }; } }\nai = (ai && typeof ai === 'object') ? ai : {};\n// The score is 0 to 100 and the threshold in Config is on the same scale. The\n// request says so, because a model answering 0 to 10 would never produce a\n// hot lead and nobody would notice.\nconst score = Math.max(0, Math.min(100, Number(ai.score) || 0));\nconst reply = String(ai.reply || '').trim();\nreturn [{ json: { ...lead, ai, score, hot: score >= Number(lead.cfg.hot_threshold), reply, reply_ok: reply.length >= 10, usage: $input.first().json.usage } }];"
       },
       "name": "Merge lead + AI verdict",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1120,
+        1320,
         200
       ]
     },
@@ -178,7 +178,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1340,
+        1540,
         200
       ],
       "retryOnFail": true,
@@ -193,7 +193,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1560,
+        1760,
         200
       ]
     },
@@ -224,7 +224,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        1780,
+        1980,
         200
       ]
     },
@@ -234,15 +234,15 @@
         "url": "={{ $json.cfg.base }}/messages/send",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ channel: $json.phone ? 'sms' : 'email', to: $json.phone || $json.email, body: $json.ai.reply }) }}",
+        "jsonBody": "={{ JSON.stringify({ channel: $json.phone ? 'sms' : 'email', to: $json.phone || $json.email, body: $json.reply }) }}",
         "options": {}
       },
       "name": "Reply in < 60 s (SMS / WhatsApp / email)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2020,
-        60
+        2240,
+        -80
       ],
       "retryOnFail": true,
       "maxTries": 3,
@@ -258,9 +258,12 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2240,
+        2460,
         60
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
@@ -268,16 +271,19 @@
         "url": "={{ $('Attach contact id').first().json.cfg.base }}/messages/send",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ channel: 'sms', to: $('Attach contact id').first().json.phone || $('Attach contact id').first().json.email, body: 'Pick a time: ' + $json.slots.slice(0,3).map((s,i) => (i+1) + ') ' + s.replace('T',' ')).join('  ') + '. Reply with the number.' }) }}",
+        "jsonBody": "={{ JSON.stringify({ channel: 'sms', to: $('Attach contact id').first().json.phone || $('Attach contact id').first().json.email, body: (($json.slots || []).length ? 'Pick a time: ' + $json.slots.slice(0,3).map(function(s,i){ return (i+1) + ') ' + String(s).replace('T',' '); }).join('  ') + '. Reply with the number.' : 'Thanks, a colleague will call you shortly to fix a time.') }) }}",
         "options": {}
       },
       "name": "Offer 3 slots",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2460,
+        2680,
         60
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
@@ -292,9 +298,12 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2680,
+        2900,
         60
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
@@ -302,16 +311,19 @@
         "url": "={{ $('Attach contact id').first().json.cfg.base }}/alerts",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ channel: '#sales-hot-leads', text: '🔥 ' + $('Attach contact id').first().json.name + ' (' + $('Attach contact id').first().json.service + ') score ' + $('Attach contact id').first().json.score + ', ' + $('Attach contact id').first().json.ai.summary }) }}",
+        "jsonBody": "={{ JSON.stringify({ channel: '#sales-hot-leads', text: '\ud83d\udd25 ' + $('Attach contact id').first().json.name + ' (' + $('Attach contact id').first().json.service + ') score ' + $('Attach contact id').first().json.score + ', ' + $('Attach contact id').first().json.ai.summary }) }}",
         "options": {}
       },
       "name": "Slack alert to sales",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2900,
+        3120,
         60
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
@@ -326,7 +338,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2020,
+        2240,
         360
       ],
       "retryOnFail": true,
@@ -346,19 +358,22 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        3120,
+        3340,
         200
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
-        "jsCode": "const l = $('Attach contact id').first().json;\nreturn [{ json: { ok: true, lead: l.name, score: l.score, route: l.hot ? 'hot: replied + slots offered + rep task' : 'nurture sequence started', contact_id: l.contact_id, tokens: l.usage } }];"
+        "jsCode": "const l = $('Attach contact id').first().json;\n// Only now is the lead marked as handled, so a failed attempt is retried by the platform.\nconst seen = $getWorkflowStaticData('global'); seen.leads = seen.leads || {};\nseen.leads[l.email || l.phone] = Date.now();\nreturn [{ json: { ok: true, lead: l.name, score: l.score, route: l.hot ? 'hot: replied + slots offered + rep task' : 'nurture sequence started', contact_id: l.contact_id, tokens: l.usage } }];"
       },
       "name": "Respond to webhook",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3340,
+        3560,
         200
       ]
     },
@@ -370,7 +385,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        900,
+        1100,
         480
       ]
     },
@@ -399,7 +414,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Retell/VAPI-style payload: {call_id, from, to, transcript, duration_s, recording_url}\nconst b = $input.first().json.body || $input.first().json;\nif (!b.transcript) throw new Error('No transcript in call payload');\nreturn [{ json: { call_id: b.call_id, phone: (b.from || '').replace(/[^+\\d]/g,''), transcript: b.transcript, duration_s: b.duration_s, base: $json.base } }];"
+        "jsCode": "// Retell/VAPI-style payload: {call_id, from, to, transcript, duration_s, recording_url}\nconst b = $input.first().json.body || $input.first().json;\nconst transcript = String(b.transcript || '').trim();\nreturn [{ json: {\n  call_id: b.call_id || '',\n  phone: String(b.from || '').replace(/[^+\\d]/g, ''),\n  transcript,\n  has_transcript: transcript.length > 0,\n  duration_s: b.duration_s,\n  base: $json.base,\n} }];"
       },
       "name": "Parse call payload",
       "type": "n8n-nodes-base.code",
@@ -422,7 +437,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        660,
+        880,
         900
       ],
       "retryOnFail": true,
@@ -442,9 +457,12 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        880,
+        1100,
         900
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
@@ -459,9 +477,12 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1100,
+        1320,
         900
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
@@ -469,28 +490,30 @@
           "options": {
             "caseSensitive": true,
             "leftValue": "",
-            "typeValidation": "strict"
+            "typeValidation": "loose",
+            "version": 2
           },
           "conditions": [
             {
               "id": "g1",
-              "leftValue": "={{ $('AI: summarise call + detect booking intent').first().json.output.outcome }}",
-              "rightValue": "appointment_requested",
+              "leftValue": "={{ (($('AI: summarise call + detect booking intent').first().json.output || {}).outcome || '') === 'appointment_requested' }}",
+              "rightValue": "",
               "operator": {
-                "type": "string",
-                "operation": "equals"
+                "type": "boolean",
+                "operation": "true"
               }
             }
           ],
           "combinator": "and"
         },
-        "options": {}
+        "options": {},
+        "looseTypeValidation": true
       },
       "name": "Appointment requested?",
       "type": "n8n-nodes-base.if",
-      "typeVersion": 2,
+      "typeVersion": 2.2,
       "position": [
-        1320,
+        1540,
         900
       ]
     },
@@ -504,9 +527,12 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1540,
+        1760,
         800
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
@@ -521,9 +547,12 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1760,
-        800
-      ]
+        2200,
+        700
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
@@ -538,19 +567,22 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1980,
-        800
-      ]
+        2420,
+        700
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
-        "jsCode": "const ai = $('AI: summarise call + detect booking intent').first().json.output;\nlet slot = null; try { slot = $('Book first slot').first().json.slot; } catch (e) {}\nreturn [{ json: { ok: true, call_id: $('Parse call payload').first().json.call_id, outcome: ai.outcome, booked: ai.outcome === 'appointment_requested', slot } }];"
+        "jsCode": "const p = $('Parse call payload').first().json;\nlet ai = {}; try { ai = $('AI: summarise call + detect booking intent').first().json.output || {}; } catch (e) {}\nif (typeof ai !== 'object') ai = {};\nlet slot = null; try { slot = $('Book first slot').first().json.slot || null; } catch (e) {}\nreturn [{ json: {\n  ok: true, call_id: p.call_id,\n  outcome: p.has_transcript ? (ai.outcome || 'unknown') : 'no transcript',\n  booked: !!slot,       // true only when a slot was actually booked, not whenever one was asked for\n  slot,\n} }];"
       },
       "name": "Respond (call)",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2200,
+        2640,
         900
       ]
     },
@@ -579,7 +611,10 @@
       "position": [
         440,
         1300
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     },
     {
       "parameters": {
@@ -618,6 +653,197 @@
         -600,
         1040
       ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "usable-lead",
+              "leftValue": "={{ $json.usable }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        480
+      ],
+      "id": "usable-lead",
+      "name": "Usable lead?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.cfg.base }}/alerts",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ channel: '#ops-alerts', text: 'Lead rejected, ' + $json.reject_reason + ': ' + $json.name + ' from ' + $json.source + '. Message: ' + ($json.message || '').slice(0, 200) }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        620
+      ],
+      "id": "alert-unusable",
+      "name": "Alert ops: unusable lead",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const l = $('Normalise + dedupe (24h)').first().json;\nreturn [{ json: { ok: false, rejected: l.reject_reason, lead: l.name, source: l.source } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        620
+      ],
+      "id": "respond-rejected",
+      "name": "Respond: rejected"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "have-a-reply",
+              "leftValue": "={{ $json.reply_ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2020,
+        -80
+      ],
+      "id": "have-a-reply",
+      "name": "Have a reply?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "have-a-transcript",
+              "leftValue": "={{ $json.has_transcript }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        1040
+      ],
+      "id": "have-a-transcript",
+      "name": "Have a transcript?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "any-slot-free",
+              "leftValue": "={{ ($json.slots || []).length > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1980,
+        800
+      ],
+      "id": "any-slot-free",
+      "name": "Any slot free?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Parse call payload').first().json.base }}/messages/send",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ channel: 'sms', to: $('Parse call payload').first().json.phone, body: 'Thanks for calling. Our calendar is full right now, so a colleague will ring you to fix a time.' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        900
+      ],
+      "id": "sms-no-slot",
+      "name": "SMS: we will call to arrange",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
     }
   ],
   "connections": {
@@ -647,7 +873,7 @@
       "main": [
         [
           {
-            "node": "Not a duplicate?",
+            "node": "Usable lead?",
             "type": "main",
             "index": 0
           }
@@ -720,7 +946,7 @@
       "main": [
         [
           {
-            "node": "Reply in < 60 s (SMS / WhatsApp / email)",
+            "node": "Have a reply?",
             "type": "main",
             "index": 0
           }
@@ -837,7 +1063,7 @@
       "main": [
         [
           {
-            "node": "AI: summarise call + detect booking intent",
+            "node": "Have a transcript?",
             "type": "main",
             "index": 0
           }
@@ -899,7 +1125,7 @@
       "main": [
         [
           {
-            "node": "Book first slot",
+            "node": "Any slot free?",
             "type": "main",
             "index": 0
           }
@@ -944,6 +1170,100 @@
         [
           {
             "node": "Alert ops (Slack)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Usable lead?": {
+      "main": [
+        [
+          {
+            "node": "Not a duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alert ops: unusable lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert ops: unusable lead": {
+      "main": [
+        [
+          {
+            "node": "Respond: rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Have a reply?": {
+      "main": [
+        [
+          {
+            "node": "Reply in < 60 s (SMS / WhatsApp / email)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Calendar: next open slots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Have a transcript?": {
+      "main": [
+        [
+          {
+            "node": "AI: summarise call + detect booking intent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond (call)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any slot free?": {
+      "main": [
+        [
+          {
+            "node": "Book first slot",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "SMS: we will call to arrange",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SMS: we will call to arrange": {
+      "main": [
+        [
+          {
+            "node": "Respond (call)",
             "type": "main",
             "index": 0
           }

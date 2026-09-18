@@ -44,7 +44,7 @@
                 "type": "string",
                 "operation": "equals"
               },
-              "leftValue": "={{ $json.messages[0].type }}",
+              "leftValue": "={{ $json.messages && $json.messages[0] ? $json.messages[0].type : '' }}",
               "rightValue": "text"
             }
           ]
@@ -81,11 +81,12 @@
         260
       ],
       "id": "conversation-so-far",
-      "name": "Conversation so far"
+      "name": "Conversation so far",
+      "alwaysOutputData": true
     },
     {
       "parameters": {
-        "jsCode": "// Work out where this conversation stands before the AI is allowed near it.\n// Three things decide that: have we already handled this exact message, is the\n// 24 hour customer service window still open, and what did we say last time.\n\nconst msg = $('Message arrives on WhatsApp').first().json;\n\nconst entry   = msg.messages && msg.messages[0] ? msg.messages[0] : {};\nconst contact = msg.contacts && msg.contacts[0] ? msg.contacts[0] : {};\n\nconst waId      = contact.wa_id || entry.from || '';\nconst messageId = entry.id || '';\nconst text      = (entry.text && entry.text.body) || '';\nconst sentAtSec = Number(entry.timestamp || 0);\n\n// Rows already in the Conversations tab, newest first.\nconst rows = $('Conversation so far').all()\n  .map(i => i.json)\n  .filter(r => String(r.wa_id || '') === String(waId));\n\nconst prior = rows.length ? rows[rows.length - 1] : null;\n\n// 1. Duplicate delivery. Meta retries a webhook when it does not get a 200\n//    quickly enough, so the same message id can arrive more than once. Answering\n//    twice is worse than answering late.\nconst alreadyHandled = !!prior && String(prior.last_message_id || '') === String(messageId) && messageId !== '';\n\n// 2. The 24 hour window. Outside it Meta only allows an approved template, not\n//    free text. Getting this wrong is the single most common way these break.\nconst lastInboundMs = sentAtSec ? sentAtSec * 1000 : Date.now();\nconst hoursSinceInbound = prior && prior.last_inbound_at\n  ? (Date.now() - Date.parse(prior.last_inbound_at)) / 3600000\n  : 0;\nconst windowOpen = hoursSinceInbound < 24;\n\n// 3. Never let the agent reply to someone a human has taken over, and never let\n//    it argue with a complaint.\nconst handedOver = !!prior && String(prior.stage || '') === 'handoff';\n\nconst COMPLAINT_WORDS = ['complaint', 'complain', 'refund', 'lawyer', 'legal',\n  'scam', 'fraud', 'terrible', 'worst', 'sue'];\nconst lower = text.toLowerCase();\nconst looksLikeComplaint = COMPLAINT_WORDS.some(w => lower.includes(w));\n\nconst turns = prior && prior.turns ? String(prior.turns) : '';\n\nreturn [{\n  json: {\n    wa_id: waId,\n    message_id: messageId,\n    text,\n    name: contact.profile && contact.profile.name ? contact.profile.name : '',\n    already_handled: alreadyHandled,\n    window_open: windowOpen,\n    handed_over: handedOver,\n    looks_like_complaint: looksLikeComplaint,\n    needs_human_now: handedOver || looksLikeComplaint,\n    hours_since_inbound: Math.round(hoursSinceInbound * 10) / 10,\n    last_inbound_at: new Date(lastInboundMs).toISOString(),\n    turns,\n    stage: prior ? prior.stage || 'new' : 'new',\n    collected: prior && prior.collected ? prior.collected : '',\n  },\n}];"
+        "jsCode": "// Work out where this conversation stands before the AI is allowed near it.\n// Three things decide that: have we already handled this exact message, is the\n// 24 hour customer service window still open, and what did we say last time.\n\nconst msg = $('Message arrives on WhatsApp').first().json;\n\nconst entry   = msg.messages && msg.messages[0] ? msg.messages[0] : {};\nconst contact = msg.contacts && msg.contacts[0] ? msg.contacts[0] : {};\n\nconst waId      = contact.wa_id || entry.from || '';\nconst messageId = entry.id || '';\nconst text      = (entry.text && entry.text.body) || '';\nconst sentAtSec = Number(entry.timestamp || 0);\n\n// Rows already in the Conversations tab, newest first.\nconst rows = $('Conversation so far').all()\n  .map(i => i.json)\n  .filter(r => String(r.wa_id || '') === String(waId));\n\nconst prior = rows.length ? rows[rows.length - 1] : null;\n\n// 1. Duplicate delivery. Meta retries a webhook when it does not get a 200\n//    quickly enough, so the same message id can arrive more than once. Answering\n//    twice is worse than answering late.\nconst alreadyHandled = !!prior && String(prior.last_message_id || '') === String(messageId) && messageId !== '';\n\n// 2. The 24 hour window. Meta measures it from the customer's LAST message,\n//    and the message being handled right now IS a customer message, so the\n//    window is open unless this webhook itself arrived more than a day late.\n//    Measuring from the previous message instead sent a template to people\n//    who had just written in.\nconst lastInboundMs = sentAtSec ? sentAtSec * 1000 : Date.now();\nconst hoursSinceInbound = (Date.now() - lastInboundMs) / 3600000;\nconst windowOpen = hoursSinceInbound < 24;\n\n// 3. Never let the agent reply to someone a human has taken over, and never let\n//    it argue with a complaint.\nconst handedOver = !!prior && String(prior.stage || '') === 'handoff';\n\nconst COMPLAINT_WORDS = ['complaint', 'complain', 'refund', 'lawyer', 'legal',\n  'scam', 'fraud', 'terrible', 'worst', 'sue'];\n// Whole words only. A substring match sent \"no issue, just asking\" to a\n// person because \"issue\" contains \"sue\".\nconst looksLikeComplaint = COMPLAINT_WORDS.some(w => new RegExp('\\\\b' + w + '\\\\b', 'i').test(text));\n\nconst turns = prior && prior.turns ? String(prior.turns) : '';\n\nreturn [{\n  json: {\n    wa_id: waId,\n    message_id: messageId,\n    text,\n    name: contact.profile && contact.profile.name ? contact.profile.name : '',\n    already_handled: alreadyHandled,\n    window_open: windowOpen,\n    handed_over: handedOver,\n    looks_like_complaint: looksLikeComplaint,\n    needs_human_now: handedOver || looksLikeComplaint,\n    hours_since_inbound: Math.round(hoursSinceInbound * 10) / 10,\n    last_inbound_at: new Date(lastInboundMs).toISOString(),\n    turns,\n    stage: prior ? prior.stage || 'new' : 'new',\n    collected: prior && prior.collected ? prior.collected : '',\n  },\n}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -191,7 +192,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// The agent has answered. Decide what actually happens, and record it.\n// The agent is allowed to draft. It is not allowed to decide on its own that a\n// lead is hot, or to send anything outside the 24 hour window.\n\nconst state = $('Work out where this conversation stands').first().json;\n\nlet ai = $json.output;\nif (typeof ai === 'string') {\n  try { ai = JSON.parse(ai); } catch (e) { ai = { reply: ai }; }\n}\nai = ai || {};\n\nconst score = Number(ai.lead_score);\nconst leadScore = Number.isFinite(score) ? Math.max(0, Math.min(10, score)) : 0;\n\n// Tunables\nconst HOT_SCORE       = 7;   // at or above this, sales is told straight away\nconst MIN_REPLY_CHARS = 2;   // an empty draft is a failure, not a reply\n\nconst collected = Object.assign({}, ai.collected || {});\nconst haveName    = !!(collected.name || state.name);\nconst haveService = !!collected.service;\nconst haveBudget  = !!collected.budget;\nconst qualified   = haveName && haveService && (haveBudget || leadScore >= HOT_SCORE);\n\nconst draft = String(ai.reply || '').trim();\nconst draftUsable = draft.length >= MIN_REPLY_CHARS;\n\n// A human takes it when the agent asks for one, when the message reads as a\n// complaint, when a human already took it, or when the agent produced nothing.\nconst toHuman = state.needs_human_now || ai.needs_human === true || !draftUsable;\n\nlet route;\nif (toHuman)                route = 'human';\nelse if (!state.window_open) route = 'template';\nelse                         route = 'reply';\n\nconst stage = toHuman ? 'handoff'\n  : (ai.booking_requested ? 'booking' : 'awaiting_reply');\n\nconst reason = state.handed_over ? 'a person already took this conversation'\n  : state.looks_like_complaint ? 'the message reads as a complaint'\n  : !draftUsable ? 'the agent produced no usable reply'\n  : ai.needs_human === true ? 'the agent asked for a person'\n  : !state.window_open ? 'the 24 hour window has closed, so only a template may be sent'\n  : 'handled by the agent';\n\nreturn [{\n  json: {\n    wa_id: state.wa_id,\n    name: collected.name || state.name || '',\n    text_in: state.text,\n    reply: draft,\n    route,\n    stage,\n    reason,\n    lead_score: leadScore,\n    qualified,\n    language: ai.language || 'en',\n    intent: ai.intent || '',\n    collected: JSON.stringify(collected),\n    hot: qualified && leadScore >= HOT_SCORE,\n    last_message_id: state.message_id,\n    last_inbound_at: state.last_inbound_at,\n    handled_at: new Date().toISOString(),\n  },\n}];"
+        "jsCode": "// The agent has answered. Decide what actually happens, and record it.\n// The agent is allowed to draft. It is not allowed to decide on its own that a\n// lead is hot, or to send anything outside the 24 hour window.\n\nconst state = $('Work out where this conversation stands').first().json;\n\nlet ai = $json.output;\nif (typeof ai === 'string') {\n  try { ai = JSON.parse(ai); } catch (e) { ai = { reply: ai }; }\n}\nai = ai || {};\n\nconst score = Number(ai.lead_score);\nconst leadScore = Number.isFinite(score) ? Math.max(0, Math.min(10, score)) : 0;\n\n// Tunables\nconst HOT_SCORE       = 7;   // at or above this, sales is told straight away\nconst MIN_REPLY_CHARS = 2;   // an empty draft is a failure, not a reply\n\n// What we know is the sum of every turn, not only this one. The previous\n// turns are stored on the row as JSON; this turn's answers are laid on top,\n// and a blank never overwrites something already known.\nlet priorCollected = {};\ntry { priorCollected = state.collected ? JSON.parse(state.collected) : {}; } catch (e) { priorCollected = {}; }\nif (!priorCollected || typeof priorCollected !== 'object' || Array.isArray(priorCollected)) priorCollected = {};\nconst fresh = (ai.collected && typeof ai.collected === 'object' && !Array.isArray(ai.collected)) ? ai.collected : {};\nconst collected = Object.assign({}, priorCollected);\nfor (const k of Object.keys(fresh)) {\n  const v = fresh[k];\n  if (v !== null && v !== undefined && String(v).trim() !== '') collected[k] = v;\n}\nconst haveName    = !!(collected.name || state.name);\nconst haveService = !!collected.service;\nconst haveBudget  = !!collected.budget;\nconst qualified   = haveName && haveService && (haveBudget || leadScore >= HOT_SCORE);\n\nconst draft = String(ai.reply || '').trim();\nconst draftUsable = draft.length >= MIN_REPLY_CHARS;\n\n// A human takes it when the agent asks for one, when the message reads as a\n// complaint, when a human already took it, or when the agent produced nothing.\nconst toHuman = state.needs_human_now || ai.needs_human === true || !draftUsable;\n\nlet route;\nif (toHuman)                route = 'human';\nelse if (!state.window_open) route = 'template';\nelse                         route = 'reply';\n\n// 'booked' is the word the hourly lane checks. Writing 'booking' here meant a\n// lead who asked to meet was nudged anyway.\nconst stage = toHuman ? 'handoff'\n  : (ai.booking_requested ? 'booked' : 'awaiting_reply');\n\nconst reason = state.handed_over ? 'a person already took this conversation'\n  : state.looks_like_complaint ? 'the message reads as a complaint'\n  : !draftUsable ? 'the agent produced no usable reply'\n  : ai.needs_human === true ? 'the agent asked for a person'\n  : !state.window_open ? 'the 24 hour window has closed, so only a template may be sent'\n  : 'handled by the agent';\n\nreturn [{\n  json: {\n    wa_id: state.wa_id,\n    name: collected.name || state.name || '',\n    text_in: state.text,\n    reply: draft,\n    route,\n    stage,\n    reason,\n    lead_score: leadScore,\n    qualified,\n    language: ai.language || 'en',\n    intent: ai.intent || '',\n    collected: JSON.stringify(collected),\n    hot: qualified && leadScore >= HOT_SCORE,\n    last_message_id: state.message_id,\n    last_inbound_at: state.last_inbound_at,\n    followup_sent: '',   // a new message starts a new lull, so one nudge is allowed again\n    handled_at: new Date().toISOString(),\n  },\n}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -310,11 +311,9 @@
     },
     {
       "parameters": {
-        "operation": "send",
-        "messageType": "template",
+        "operation": "sendTemplate",
         "template": "<__PLACEHOLDER_VALUE__Name of your approved Meta template for reopening a conversation, e.g. followup_en__>",
         "phoneNumberId": "<__PLACEHOLDER_VALUE__Same WhatsApp phone number id__>",
-        "additionalFields": {},
         "recipientPhoneNumber": "={{ $json.wa_id }}"
       },
       "type": "n8n-nodes-base.whatsApp",
@@ -351,7 +350,9 @@
         "columns": {
           "value": {},
           "mappingMode": "autoMapInputData",
-          "matchingColumns": []
+          "matchingColumns": [
+            "wa_id"
+          ]
         },
         "options": {},
         "operation": "appendOrUpdate",
@@ -398,8 +399,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.5,
       "position": [
-        1800,
-        320
+        2240,
+        140
       ],
       "id": "save-the-lead",
       "name": "Save the lead"
@@ -414,8 +415,8 @@
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.2,
       "position": [
-        2020,
-        320
+        2680,
+        140
       ],
       "id": "email-the-hot-leads",
       "name": "Email the hot leads"
@@ -448,7 +449,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        2020,
+        2460,
         140
       ],
       "id": "hot-lead",
@@ -495,11 +496,12 @@
         800
       ],
       "id": "all-conversations",
-      "name": "All conversations"
+      "name": "All conversations",
+      "alwaysOutputData": true
     },
     {
       "parameters": {
-        "jsCode": "// Hourly: find conversations that went quiet and decide whether a nudge is\n// allowed. The rule that matters is Meta's, not ours: after 24 hours only an\n// approved template may be sent, and nobody gets nudged twice.\n\nconst rows = $('All conversations').all().map(i => i.json);\n\nconst QUIET_AFTER_HOURS = 4;    // long enough that they are not still typing\nconst GIVE_UP_AFTER_DAYS = 7;   // past this, stop\n\nconst out = [];\nfor (const r of rows) {\n  const wa_id = String(r.wa_id || '');\n  if (!wa_id) continue;\n\n  const lastIn = Date.parse(r.last_inbound_at || '');\n  if (!Number.isFinite(lastIn)) continue;\n\n  const hours = (Date.now() - lastIn) / 3600000;\n  const stage = String(r.stage || '');\n  const nudged = String(r.followup_sent || '').toLowerCase() === 'true';\n\n  let action = 'skip';\n  let reason = '';\n\n  if (stage === 'handoff')            reason = 'a person has it';\n  else if (stage === 'booked')        reason = 'already booked';\n  else if (nudged)                    reason = 'already nudged once';\n  else if (hours < QUIET_AFTER_HOURS) reason = 'not quiet yet';\n  else if (hours > GIVE_UP_AFTER_DAYS * 24) reason = 'too old';\n  else if (hours < 24) { action = 'freeform_nudge'; reason = 'inside the 24 hour window'; }\n  else                 { action = 'template';       reason = 'outside the 24 hour window, template only'; }\n\n  out.push({ json: {\n    wa_id,\n    name: r.name || '',\n    action,\n    reason,\n    hours_since_inbound: Math.round(hours * 10) / 10,\n    lead_score: Number(r.lead_score || 0),\n  }});\n}\n\n// Quietest first, so the oldest lead is not the one that gets dropped.\nout.sort((a, b) => b.json.hours_since_inbound - a.json.hours_since_inbound);\nreturn out;"
+        "jsCode": "// Hourly: find conversations that went quiet and decide whether a nudge is\n// allowed. The rule that matters is Meta's, not ours: after 24 hours only an\n// approved template may be sent, and nobody gets nudged twice.\n\nconst rows = $('All conversations').all().map(i => i.json);\n\nconst QUIET_AFTER_HOURS = 4;    // long enough that they are not still typing\nconst GIVE_UP_AFTER_DAYS = 7;   // past this, stop\n\nconst out = [];\nfor (const r of rows) {\n  const wa_id = String(r.wa_id || '');\n  if (!wa_id) continue;\n\n  const lastIn = Date.parse(r.last_inbound_at || '');\n  if (!Number.isFinite(lastIn)) continue;\n\n  const hours = (Date.now() - lastIn) / 3600000;\n  const stage = String(r.stage || '');\n  const nudged = String(r.followup_sent || '').toLowerCase() === 'true';\n\n  let action = 'skip';\n  let reason = '';\n\n  if (stage === 'handoff')            reason = 'a person has it';\n  else if (stage === 'booked' || stage === 'booking') reason = 'already booked';   // 'booking' is what an earlier version wrote\n  else if (nudged)                    reason = 'already nudged once';\n  else if (hours < QUIET_AFTER_HOURS) reason = 'not quiet yet';\n  else if (hours > GIVE_UP_AFTER_DAYS * 24) reason = 'too old';\n  else if (hours < 24) { action = 'freeform_nudge'; reason = 'inside the 24 hour window'; }\n  else                 { action = 'template';       reason = 'outside the 24 hour window, template only'; }\n\n  out.push({ json: {\n    wa_id,\n    name: r.name || '',\n    action,\n    reason,\n    hours_since_inbound: Math.round(hours * 10) / 10,\n    lead_score: Number(r.lead_score || 0),\n  }});\n}\n\n// Quietest first, so the oldest lead is not the one that gets dropped.\nout.sort((a, b) => b.json.hours_since_inbound - a.json.hours_since_inbound);\nreturn out;"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -555,8 +557,8 @@
       "type": "n8n-nodes-base.whatsApp",
       "typeVersion": 1,
       "position": [
-        640,
-        720
+        880,
+        760
       ],
       "id": "send-the-nudge",
       "name": "Send the nudge"
@@ -567,7 +569,7 @@
       "typeVersion": 1,
       "position": [
         640,
-        900
+        960
       ],
       "id": "nothing-to-nudge",
       "name": "Nothing to nudge"
@@ -623,7 +625,7 @@
       "parameters": {
         "width": 520,
         "height": 480,
-        "content": "## Setup\n\n**1. Credentials.** WhatsApp Business Cloud, Google Sheets, OpenAI, Slack and Gmail. Each node asks for its own.\n\n**2. The sheet.** One Google Sheet with two tabs.\n\n`Conversations`: wa_id, name, stage, last_message_id, last_inbound_at, lead_score, language, collected, followup_sent, turns\n\n`Leads`: handled_at, wa_id, name, lead_score, intent, language, qualified, text_in, reply, reason, collected\n\n**3. Placeholders.** Set the phone number id, the sheet URL, the Slack channels and the email address. Every one is marked in the node.\n\n**4. The template.** Create and get Meta to approve one re-engagement template, then put its name in *Send the approved template*. Outside 24 hours this is the only thing Meta will deliver.",
+        "content": "## Setup\n\n**1. Credentials.** WhatsApp Business Cloud, Google Sheets, OpenAI, Slack and Gmail. Each node asks for its own.\n\n**2. The sheet.** One Google Sheet with two tabs.\n\n`Conversations`: wa_id, name, stage, last_message_id, last_inbound_at, lead_score, language, collected, followup_sent, followup_at, turns. One row per customer, matched on wa_id.\n\n`Leads`: handled_at, wa_id, name, lead_score, intent, language, qualified, text_in, reply, reason, collected\n\n**3. Placeholders.** Set the phone number id, the sheet URL, the Slack channels and the email address. Every one is marked in the node.\n\n**4. The template.** Create and get Meta to approve one re-engagement template, then put its name in *Send the approved template* and *Send the nudge template*. Outside 24 hours this is the only thing Meta will deliver.",
         "color": 7
       },
       "type": "n8n-nodes-base.stickyNote",
@@ -639,7 +641,7 @@
       "parameters": {
         "width": 380,
         "height": 260,
-        "content": "### The 24 hour window\n\nMeta lets you send free text only within 24 hours of the customer's last message. After that only an approved template goes through. *Work out where this conversation stands* measures the gap and *Reply, template or person* acts on it, so the workflow cannot quietly fail by sending something Meta will drop.",
+        "content": "### The 24 hour window\n\nMeta lets you send free text only within 24 hours of the customer's last message. On the inbound lane the customer has just written, so the window is open by definition and the reply goes as free text; the only exception is a webhook that arrives more than a day late. The hourly lane is where the window actually bites: *Free text or template?* checks the age of the customer's last message and sends the approved template when it is past 24 hours.",
         "color": 5
       },
       "type": "n8n-nodes-base.stickyNote",
@@ -671,7 +673,7 @@
       "parameters": {
         "width": 380,
         "height": 200,
-        "content": "### Follow-ups\n\nHourly. A conversation that has been quiet for four hours gets one nudge, never two, and nothing is sent to a conversation a person has taken over.",
+        "content": "### Follow-ups\n\nHourly. A conversation that has been quiet for four hours gets one nudge, then the row is marked so it is not nudged again until the customer writes back. Inside 24 hours the nudge is free text; outside it only the approved template is sent, because Meta drops anything else. Nothing is sent to a conversation a person has taken over or one that is booked.",
         "color": 3
       },
       "type": "n8n-nodes-base.stickyNote",
@@ -682,6 +684,167 @@
       ],
       "id": "note-140_1020",
       "name": "Note 140_1020"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "lead",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              },
+              "leftValue": "={{ $json.qualified }}",
+              "rightValue": ""
+            }
+          ]
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2020,
+        140
+      ],
+      "id": "is-it-a-lead",
+      "name": "Is it a lead?"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "outputKey": "free text",
+              "renameOutput": true,
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "ft",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "freeform_nudge"
+                  }
+                ]
+              }
+            },
+            {
+              "outputKey": "template",
+              "renameOutput": true,
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "tp",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "template"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        640,
+        800
+      ],
+      "id": "free-text-or-template",
+      "name": "Free text or template?"
+    },
+    {
+      "parameters": {
+        "operation": "sendTemplate",
+        "template": "<__PLACEHOLDER_VALUE__Name of your approved Meta template for reopening a conversation, e.g. followup_en__>",
+        "phoneNumberId": "<__PLACEHOLDER_VALUE__Same WhatsApp phone number id__>",
+        "recipientPhoneNumber": "={{ $json.wa_id }}"
+      },
+      "type": "n8n-nodes-base.whatsApp",
+      "typeVersion": 1,
+      "position": [
+        880,
+        940
+      ],
+      "id": "send-the-nudge-template",
+      "name": "Send the nudge template"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "options": {},
+        "jsonOutput": "={{ JSON.stringify({ wa_id: $('Find quiet conversations').item.json.wa_id, followup_sent: 'true', followup_at: new Date().toISOString() }) }}"
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1120,
+        850
+      ],
+      "id": "nudge-record",
+      "name": "Nudge record"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "mode": "url",
+          "value": "<__PLACEHOLDER_VALUE__URL of the Google Sheet holding the Conversations and Leads tabs__>"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Conversations"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": [
+            "wa_id"
+          ],
+          "value": {}
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1340,
+        850
+      ],
+      "id": "mark-the-nudge-sent",
+      "name": "Mark the nudge sent"
     }
   ],
   "connections": {
@@ -853,7 +1016,7 @@
       "main": [
         [
           {
-            "node": "Save the lead",
+            "node": "Is it a lead?",
             "type": "main",
             "index": 0
           }
@@ -920,7 +1083,7 @@
       "main": [
         [
           {
-            "node": "Send the nudge",
+            "node": "Free text or template?",
             "type": "main",
             "index": 0
           }
@@ -939,6 +1102,69 @@
         [
           {
             "node": "Say the run failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is it a lead?": {
+      "main": [
+        [
+          {
+            "node": "Save the lead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Free text or template?": {
+      "main": [
+        [
+          {
+            "node": "Send the nudge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send the nudge template",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send the nudge": {
+      "main": [
+        [
+          {
+            "node": "Nudge record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send the nudge template": {
+      "main": [
+        [
+          {
+            "node": "Nudge record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nudge record": {
+      "main": [
+        [
+          {
+            "node": "Mark the nudge sent",
             "type": "main",
             "index": 0
           }
